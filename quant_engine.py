@@ -12,7 +12,7 @@ logger = logging.getLogger("QuantEngine")
 @dataclass
 class MicrostructureEvent:
     timestamp: float
-    event_type: str  # "SPOOF_BID", "SPOOF_ASK", "ABSORPTION_BULL", "ABSORPTION_BEAR"
+    event_type: str
     price: float
     size: float
     details: str
@@ -22,7 +22,7 @@ class MicrostructureEvent:
 class TradeSetup:
     timestamp: float
     symbol: str
-    direction: str  # "LONG" or "SHORT"
+    direction: str
     entry_price: float
     stop_loss: float
     take_profit: float
@@ -38,7 +38,7 @@ class TradeSetup:
 class StudentAutoSignal:
     timestamp: float
     symbol: str
-    timeframe_bias: str  # e.g. "15m + 1H + 4H BULLISH"
+    timeframe_bias: str
     risk_tier: str       # "LOW RISK", "MEDIUM RISK", "HIGH RISK"
     direction: str       # "LONG" or "SHORT"
     entry_price: float
@@ -48,20 +48,22 @@ class StudentAutoSignal:
     tp3: float
     position_size_units: float
     position_notional_usd: float
-    safe_leverage: float
+    margin_required_usd: float
+    leverage: int        # 20, 50, or 100
     win_probability: int
     risk_warning: str
     structure_level: float
     imbalance: float
     garch_vol: float
+    status: str = "ACTIVE"   # "ACTIVE", "MISSED", "TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT"
+    status_note: str = "VALID ENTRY WINDOW"
 
 
 class QuantEngine:
     """
-    Institutional-grade quantitative microstructure & volatility engine.
-    Computes distance-weighted L2 imbalance, spoof filters, CVD tape absorption,
-    multi-timeframe (15m/1H/4H) auto-structural levels, Student-t GARCH(1,1)
-    volatility scaling, and automated Low/Medium/High risk student setups.
+    Institutional-grade quantitative microstructure & volatility engine with
+    real-time signal lifecycle tracking (Missed Entry / TP / SL auto-invalidation)
+    and 20x / 50x / 100x leverage presets.
     """
 
     def __init__(
@@ -86,14 +88,12 @@ class QuantEngine:
 
         self.weights = self._compute_weights(decay_lambda, depth_levels)
 
-        # Fixed ring buffers for constant low RAM usage
         self.trade_buffer: deque = deque(maxlen=15000)
         self.ob_history: deque = deque(maxlen=50)
         self.imbalance_history: deque = deque(maxlen=600)
         self.events_log: deque = deque(maxlen=100)
         self.student_signal_feed: deque = deque(maxlen=40)
 
-        # State tracking
         self.last_spoof_ts: float = 0.0
         self.spoofed_price_levels: Dict[float, float] = {}
         self.garch_sigma: float = 0.0045
@@ -101,7 +101,6 @@ class QuantEngine:
         self.garch_regime: str = "CALIBRATING"
         self.latest_signal: Optional[TradeSetup] = None
 
-        # Multi-timeframe auto-structural state (15m, 1H, 4H)
         self.auto_sr_levels: Dict[str, List[float]] = {"15m": [], "1H": [], "4H": []}
         self.tf_bias: Dict[str, str] = {"15m": "NEUTRAL", "1H": "NEUTRAL", "4H": "NEUTRAL"}
         self.latest_student_profiles: Dict[str, Optional[StudentAutoSignal]] = {
@@ -134,10 +133,6 @@ class QuantEngine:
     # 1. Multi-Timeframe Auto-Structural S/R & Trend Detection (15m / 1H / 4H)
     # -------------------------------------------------------------------------
     def update_timeframe_structure(self, tf_label: str, ohlcv_rows: List[Tuple[float, float, float, float]]) -> None:
-        """
-        Extracts swing highs/lows and EMA trend direction from (open, high, low, close) candles
-        for 15m, 1H, and 4H timeframes automatically.
-        """
         if len(ohlcv_rows) < 25:
             return
 
@@ -145,7 +140,6 @@ class QuantEngine:
         lows = np.array([r[2] for r in ohlcv_rows], dtype=np.float64)
         closes = np.array([r[3] for r in ohlcv_rows], dtype=np.float64)
 
-        # Swing pivot detection (window = 4 bars left/right)
         pivots = []
         w = 4
         for i in range(w, len(highs) - w):
@@ -154,7 +148,6 @@ class QuantEngine:
             if lows[i] == np.min(lows[i - w : i + w + 1]):
                 pivots.append(float(lows[i]))
 
-        # Keep most recent distinct structural levels (deduplicated within 0.15%)
         unique_levels: List[float] = []
         for lvl in reversed(pivots):
             if all(abs(lvl - existing) / max(existing, 1e-8) > 0.0015 for existing in unique_levels):
@@ -164,12 +157,11 @@ class QuantEngine:
 
         self.auto_sr_levels[tf_label] = sorted(unique_levels)
 
-        # Fast vs Slow EMA bias for timeframe alignment
         ema_fast = float(np.mean(closes[-8:]))
         ema_slow = float(np.mean(closes[-21:]))
-        if ema_fast > ema_slow * 1.0008:
+        if ema_fast > ema_slow * 1.0005:
             self.tf_bias[tf_label] = "BULLISH"
-        elif ema_fast < ema_slow * 0.9992:
+        elif ema_fast < ema_slow * 0.9995:
             self.tf_bias[tf_label] = "BEARISH"
         else:
             self.tf_bias[tf_label] = "NEUTRAL"
@@ -256,7 +248,7 @@ class QuantEngine:
         return cvd_15s, cvd_1m, cvd_5m, exec_buy_500ms, exec_sell_500ms
 
     # -------------------------------------------------------------------------
-    # 4. Level-2 Depth Processing, Spoof Detection & Dual-Mode Signal Generation
+    # 4. Level-2 Depth Processing, Spoof Detection & Lifecycle Tracking
     # -------------------------------------------------------------------------
     def process_orderbook(
         self,
@@ -281,6 +273,9 @@ class QuantEngine:
         mid_price = 0.5 * (best_bid + best_ask)
         spread = max(best_ask - best_bid, 0.0)
         phi_t = spread / mid_price if mid_price > 0 else 1.0
+
+        # Update lifecycle status (Missed Entry / TP1 / TP2 / TP3 / SL) on all active student signals
+        self._update_active_signal_lifecycles(timestamp_sec, mid_price)
 
         self.spoofed_price_levels = {
             p: exp for p, exp in self.spoofed_price_levels.items() if exp > timestamp_sec
@@ -320,7 +315,6 @@ class QuantEngine:
         spoof_active = (timestamp_sec - self.last_spoof_ts) < self.spoof_suppress_sec
         spread_ok = phi_t <= self.max_spread_phi
 
-        # Always keep live 3-tier Student Presets refreshed with current price/GARCH levels
         self._refresh_live_student_presets(
             timestamp_sec=timestamp_sec,
             symbol=symbol,
@@ -331,7 +325,6 @@ class QuantEngine:
             student_balance=student_balance,
         )
 
-        # Only fire new triggers when Scanner Toggle is ON, spread is clean, and no spoof suppression is active
         if scanner_active and spread_ok and not spoof_active:
             if absorption_state is not None:
                 self._evaluate_pro_trade_setup(
@@ -382,6 +375,64 @@ class QuantEngine:
             "tf_bias": dict(self.tf_bias),
             "auto_sr_levels": {k: list(v) for k, v in self.auto_sr_levels.items()},
         }
+
+    def _update_active_signal_lifecycles(self, now: float, mid_price: float) -> None:
+        """
+        Checks every active StudentAutoSignal against live price ticks:
+        - Marks MISSED if price runs >55% of the way to TP1 or ages past 15 mins without filling.
+        - Marks TP1_HIT / TP2_HIT / TP3_HIT or SL_HIT once triggered so students never enter stale setups.
+        """
+        for sig in self.student_signal_feed:
+            if sig.status not in ("ACTIVE", "TP1_HIT", "TP2_HIT"):
+                continue
+
+            age_sec = now - sig.timestamp
+            if sig.direction == "LONG":
+                # Check Stop-Loss
+                if mid_price <= sig.stop_loss:
+                    sig.status = "SL_HIT"
+                    sig.status_note = "STOP-LOSS HIT (CLOSED)"
+                    continue
+                # Check Take-Profits
+                if mid_price >= sig.tp3:
+                    sig.status = "TP3_HIT"
+                    sig.status_note = "ALL TPs HIT (TP3)"
+                    continue
+                if mid_price >= sig.tp2:
+                    sig.status = "TP2_HIT"
+                    sig.status_note = "TP2 HIT (MOVE SL TO TP1)"
+                    continue
+                if mid_price >= sig.tp1:
+                    sig.status = "TP1_HIT"
+                    sig.status_note = "TP1 HIT (MOVE SL TO ENTRY)"
+                    continue
+                # Check Missed Entry (price ran >55% toward TP1 before student entered)
+                runaway_threshold = sig.entry_price + 0.55 * (sig.tp1 - sig.entry_price)
+                if sig.status == "ACTIVE" and (mid_price >= runaway_threshold or age_sec > 900):
+                    sig.status = "MISSED"
+                    sig.status_note = "ENTRY MISSED — PRICE MOVED AWAY"
+
+            else:  # SHORT
+                if mid_price >= sig.stop_loss:
+                    sig.status = "SL_HIT"
+                    sig.status_note = "STOP-LOSS HIT (CLOSED)"
+                    continue
+                if mid_price <= sig.tp3:
+                    sig.status = "TP3_HIT"
+                    sig.status_note = "ALL TPs HIT (TP3)"
+                    continue
+                if mid_price <= sig.tp2:
+                    sig.status = "TP2_HIT"
+                    sig.status_note = "TP2 HIT (MOVE SL TO TP1)"
+                    continue
+                if mid_price <= sig.tp1:
+                    sig.status = "TP1_HIT"
+                    sig.status_note = "TP1 HIT (MOVE SL TO ENTRY)"
+                    continue
+                runaway_threshold = sig.entry_price - 0.55 * (sig.entry_price - sig.tp1)
+                if sig.status == "ACTIVE" and (mid_price <= runaway_threshold or age_sec > 900):
+                    sig.status = "MISSED"
+                    sig.status_note = "ENTRY MISSED — PRICE MOVED AWAY"
 
     def _detect_spoofs(
         self,
@@ -509,28 +560,43 @@ class QuantEngine:
         account_balance: float,
         risk_pct: float,
         k_mult: Optional[float] = None,
-        max_lev_cap: float = 50.0,
-    ) -> Tuple[float, float, float, float]:
+        fixed_leverage: Optional[int] = None,
+    ) -> Tuple[float, float, float, float, float]:
+        """
+        Returns (sl_dist, position_units, notional_usd, margin_required_usd, effective_leverage).
+        When fixed_leverage is specified (20x, 50x, 100x), caps position notional so margin
+        never exceeds account balance and ensures liquidation sits safely beyond SL.
+        """
         mult = k_mult if k_mult is not None else self.garch_k
-        sl_dist = max(mult * self.garch_sigma * entry_price, entry_price * 0.0008)
+        sl_dist = max(mult * self.garch_sigma * entry_price, entry_price * 0.0010)
+        stop_pct = sl_dist / entry_price
 
         risk_usd = account_balance * (risk_pct / 100.0)
         position_units = risk_usd / sl_dist
         notional_usd = position_units * entry_price
 
-        stop_pct = sl_dist / entry_price
+        if fixed_leverage is not None:
+            lev = float(fixed_leverage)
+            # Ensure initial margin + SL loss cannot exceed 80% of account balance
+            max_safe_notional = account_balance * lev * 0.80
+            if notional_usd > max_safe_notional:
+                notional_usd = max_safe_notional
+                position_units = notional_usd / entry_price
+            margin_required = notional_usd / lev
+            return sl_dist, position_units, notional_usd, margin_required, lev
+
         vol_derived_max_lev = 0.50 / max(stop_pct, 1e-4)
         required_lev = notional_usd / max(account_balance, 1.0)
         safe_leverage = float(
-            np.clip(min(vol_derived_max_lev, max(required_lev * 1.25, 1.0)), 1.0, max_lev_cap)
+            np.clip(min(vol_derived_max_lev, max(required_lev * 1.25, 1.0)), 1.0, 100.0)
         )
-
         if required_lev > vol_derived_max_lev:
             notional_usd = account_balance * vol_derived_max_lev
             position_units = notional_usd / entry_price
-            safe_leverage = float(np.clip(vol_derived_max_lev, 1.0, max_lev_cap))
+            safe_leverage = float(np.clip(vol_derived_max_lev, 1.0, 100.0))
 
-        return sl_dist, position_units, notional_usd, safe_leverage
+        margin_required = notional_usd / max(safe_leverage, 1.0)
+        return sl_dist, position_units, notional_usd, margin_required, safe_leverage
 
     def _evaluate_pro_trade_setup(
         self,
@@ -564,7 +630,7 @@ class QuantEngine:
 
         if absorption_state == "ABSORPTION_BULL" and imbalance_t >= self.imbalance_threshold:
             entry = best_bid
-            sl_dist, units, notional, lev = self.compute_position_sizing(
+            sl_dist, units, notional, _, lev = self.compute_position_sizing(
                 entry, account_balance, risk_pct
             )
             zone_txt = f" near S/R {matched_zone:,.4f}" if matched_zone else ""
@@ -585,7 +651,7 @@ class QuantEngine:
 
         elif absorption_state == "ABSORPTION_BEAR" and imbalance_t <= -self.imbalance_threshold:
             entry = best_ask
-            sl_dist, units, notional, lev = self.compute_position_sizing(
+            sl_dist, units, notional, _, lev = self.compute_position_sizing(
                 entry, account_balance, risk_pct
             )
             zone_txt = f" near S/R {matched_zone:,.4f}" if matched_zone else ""
@@ -605,7 +671,7 @@ class QuantEngine:
             )
 
     # -------------------------------------------------------------------------
-    # 6. Automated Layman Student Profiles (Low / Medium / High Risk)
+    # 6. Automated Student Profiles (20x / 50x / 100x Leverage)
     # -------------------------------------------------------------------------
     def _build_student_preset(
         self,
@@ -620,16 +686,25 @@ class QuantEngine:
         matched_level: float,
         confluence_score: int,
     ) -> StudentAutoSignal:
-        # Tier configurations: (risk_pct, garch_k_multiplier, max_leverage_cap)
+        # Tier configurations: (account_risk_pct, garch_k_multiplier, leverage_int)
         tier_cfg = {
-            "LOW RISK": (0.5, 2.2, 5.0),
-            "MEDIUM RISK": (1.0, 1.5, 12.0),
-            "HIGH RISK": (2.0, 1.1, 25.0),
+            "LOW RISK": (0.5, 2.2, 20),
+            "MEDIUM RISK": (1.0, 1.5, 50),
+            "HIGH RISK": (2.0, 1.1, 100),
         }
-        r_pct, k_mult, max_lev = tier_cfg[risk_tier]
-        sl_dist, units, notional, safe_lev = self.compute_position_sizing(
-            entry_price, student_balance, r_pct, k_mult=k_mult, max_lev_cap=max_lev
+        r_pct, k_mult, lev_int = tier_cfg[risk_tier]
+        sl_dist, units, notional, margin_req, _ = self.compute_position_sizing(
+            entry_price, student_balance, r_pct, k_mult=k_mult, fixed_leverage=lev_int
         )
+
+        # Ensure SL distance never exceeds liquidation distance for 50x/100x leverage
+        max_sl_pct = 0.75 / lev_int
+        if (sl_dist / entry_price) > max_sl_pct:
+            sl_dist = entry_price * max_sl_pct
+            risk_usd = student_balance * (r_pct / 100.0)
+            units = risk_usd / sl_dist
+            notional = units * entry_price
+            margin_req = notional / lev_int
 
         if direction == "LONG":
             stop_loss = entry_price - sl_dist
@@ -642,7 +717,6 @@ class QuantEngine:
             tp2 = entry_price - (sl_dist * 2.5)
             tp3 = entry_price - (sl_dist * 4.0)
 
-        # Probability & Risk Warning synthesis
         is_high_vol = "HIGH" in self.garch_regime
         base_prob = 58 + confluence_score * 6
         if risk_tier == "LOW RISK":
@@ -654,13 +728,13 @@ class QuantEngine:
 
         if is_high_vol:
             win_prob = max(win_prob - 7, 50)
-            warning = "ELEVATED VOLATILITY — STRICT STOP LOSS REQUIRED"
+            warning = "ELEVATED VOLATILITY — USE ISOLATED MARGIN & STRICT SL"
         elif risk_tier == "HIGH RISK":
-            warning = "AGGRESSIVE SCALP — FAST EXECUTION & TIGHT STOP"
+            warning = "100x HIGH LEVERAGE — USE ISOLATED MARGIN ONLY"
         elif risk_tier == "MEDIUM RISK":
-            warning = "BALANCED INSTITUTIONAL SETUP — MOVE SL TO ENTRY AT TP1"
+            warning = "50x BALANCED — MOVE SL TO ENTRY AFTER TP1"
         else:
-            warning = "CONSERVATIVE HIGH-CONFLUENCE SETUP — LOW RISK"
+            warning = "20x CONSERVATIVE — HIGH-CONFLUENCE STRUCTURE"
 
         bias_summary = f"{matched_tf} S/R ({self.tf_bias.get('15m','NEUTRAL')}/{self.tf_bias.get('1H','NEUTRAL')}/{self.tf_bias.get('4H','NEUTRAL')})"
 
@@ -677,12 +751,15 @@ class QuantEngine:
             tp3=tp3,
             position_size_units=units,
             position_notional_usd=notional,
-            safe_leverage=safe_lev,
+            margin_required_usd=margin_req,
+            leverage=lev_int,
             win_probability=win_prob,
             risk_warning=warning,
             structure_level=matched_level,
             imbalance=imbalance_t,
             garch_vol=self.garch_sigma,
+            status="ACTIVE",
+            status_note="VALID ENTRY WINDOW",
         )
 
     def _refresh_live_student_presets(
@@ -695,14 +772,9 @@ class QuantEngine:
         imbalance_t: float,
         student_balance: float,
     ) -> None:
-        """
-        Continuously maintains live-calibrated Low, Medium, and High Risk setup cards
-        anchored to the nearest auto-detected 15m/1H/4H structural level and live book skew.
-        """
         direction = "LONG" if imbalance_t >= 0 else "SHORT"
         entry = best_bid if direction == "LONG" else best_ask
 
-        # Find nearest auto-detected structural level across 4H, 1H, 15m
         all_zones = self.get_all_auto_zones()
         matched_tf = "15m/1H"
         matched_level = mid_price
@@ -710,11 +782,10 @@ class QuantEngine:
             best_zone = min(all_zones, key=lambda item: abs(item[1] - mid_price))
             matched_tf, matched_level = best_zone
 
-        # Calculate confluence score (0 to 4)
         score = 0
-        if abs(imbalance_t) >= 0.35:
+        if abs(imbalance_t) >= 0.25:
             score += 1
-        if abs(imbalance_t) >= 0.50:
+        if abs(imbalance_t) >= 0.45:
             score += 1
         if self.tf_bias.get("1H") == ("BULLISH" if direction == "LONG" else "BEARISH"):
             score += 1
@@ -746,16 +817,13 @@ class QuantEngine:
         absorption_state: Optional[str],
         student_balance: float,
     ) -> None:
-        """
-        Emits verified automated signals into the live multi-coin student feed
-        whenever order book skew + structural proximity + absorption align.
-        """
-        if (timestamp_sec - self._last_student_emit_ts) < 30.0:
+        # Emit at most once per 45 seconds per coin so feed stays clean and actionable
+        if (timestamp_sec - self._last_student_emit_ts) < 45.0:
             return
 
-        # Trigger condition: either confirmed absorption OR extreme order book imbalance (>0.48) near auto-structure
-        bull_trigger = (absorption_state == "ABSORPTION_BULL" and imbalance_t >= 0.35) or (imbalance_t >= 0.52)
-        bear_trigger = (absorption_state == "ABSORPTION_BEAR" and imbalance_t <= -0.35) or (imbalance_t <= -0.52)
+        # Trigger on confirmed absorption OR decisive order book skew (|I_t| >= 0.36)
+        bull_trigger = (absorption_state == "ABSORPTION_BULL" and imbalance_t >= 0.25) or (imbalance_t >= 0.36)
+        bear_trigger = (absorption_state == "ABSORPTION_BEAR" and imbalance_t <= -0.25) or (imbalance_t <= -0.36)
 
         if not (bull_trigger or bear_trigger):
             return
@@ -763,25 +831,13 @@ class QuantEngine:
         direction = "LONG" if bull_trigger else "SHORT"
         entry = best_bid if direction == "LONG" else best_ask
 
-        # Check proximity to auto-detected 15m/1H/4H levels (within 1.5 * GARCH sigma)
         all_zones = self.get_all_auto_zones()
         matched_tf = "15m"
         matched_level = mid_price
-        near_structure = False
-        tol = max(self.garch_sigma * mid_price * 1.5, mid_price * 0.002)
+        if all_zones:
+            matched_tf, matched_level = min(all_zones, key=lambda item: abs(item[1] - mid_price))
 
-        for tf, lvl in all_zones:
-            if abs(mid_price - lvl) <= tol:
-                near_structure = True
-                matched_tf = tf
-                matched_level = lvl
-                break
-
-        if all_zones and not near_structure:
-            return
-
-        # Choose risk tier classification based on signal strength
-        if abs(imbalance_t) >= 0.55 and absorption_state is not None:
+        if abs(imbalance_t) >= 0.52 and absorption_state is not None:
             tier = "LOW RISK"
             score = 4
         elif abs(imbalance_t) >= 0.42:
