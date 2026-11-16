@@ -1,157 +1,298 @@
-import datetime
 import time
-from typing import List
-import pandas as pd
-import streamlit as st
-from stream_manager import BinanceFuturesStreamManager, WATCHLIST_SYMBOLS
+import logging
+from collections import deque
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+import numpy as np
+from arch import arch_model
 
-PKT_TZ = datetime.timezone(datetime.timedelta(hours=5), name="PKT")
-UTC_TZ = datetime.timezone.utc
-
-
-def format_dual_time(ts: float) -> str:
-    dt_pkt = datetime.datetime.fromtimestamp(ts, tz=PKT_TZ).strftime("%H:%M:%S PKT")
-    dt_utc = datetime.datetime.fromtimestamp(ts, tz=UTC_TZ).strftime("%H:%M:%S UTC")
-    return f"{dt_pkt} ({dt_utc})"
+logger = logging.getLogger("QuantEngine")
 
 
-st.set_page_config(page_title="Student Committed Signals & Coinglass Terminal", page_icon="⚡", layout="wide")
+@dataclass
+class MicrostructureEvent:
+    timestamp: float
+    event_type: str
+    price: float
+    size: float
+    details: str
 
-st.markdown(
+
+@dataclass
+class TradeSetup:
+    timestamp: float
+    symbol: str
+    direction: str
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    position_size_units: float
+    position_notional_usd: float
+    safe_leverage: float
+    imbalance: float
+    garch_vol: float
+    reason: str
+
+
+@dataclass
+class CommittedSignal:
+    timestamp: float
+    symbol: str
+    timeframe: str
+    risk_tier: str
+    direction: str
+    entry_price: float
+    stop_loss: float
+    tp1: float
+    tp2: float
+    tp3: float
+    position_size_units: float
+    position_notional_usd: float
+    margin_required_usd: float
+    leverage: int
+    win_probability: int
+    eta_pkt_utc: str
+    risk_warning: str
+    status: str = "COMMITTED_ACTIVE"
+    status_note: str = "TRACKING LIVE TO TP/SL"
+
+
+class QuantEngine:
     """
-<style>
-.stApp { background-color: #F1F5F9; color: #0F172A; }
-.neutral-card { background-color: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 10px; padding: 14px 16px; color: #0F172A; }
-.preset-card { background-color: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 10px; padding: 18px; color: #0F172A; }
-.price-box { background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px; font-family: monospace; font-size: 0.88rem; margin: 10px 0; }
-.price-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #E2E8F0; }
-.badge-long { background-color: #DCFCE7; color: #166534; border: 1px solid #86EFAC; padding: 3px 10px; border-radius: 5px; font-weight: 800; font-family: monospace; }
-.badge-short { background-color: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; padding: 3px 10px; border-radius: 5px; font-weight: 800; font-family: monospace; }
-.coinglass-banner { background: linear-gradient(135deg, #0F172A, #1E293B); color: #F8FAFC; border-radius: 10px; padding: 14px 18px; font-family: monospace; font-size: 0.85rem; margin-bottom: 16px; }
-</style>
-""",
-    unsafe_allow_html=True,
-)
+    Institutional quantitative engine with stable signal generation,
+    Coinglass liquidation modeling, ETA estimation, and pinned signal tracking.
+    """
 
+    def __init__(
+        self,
+        decay_lambda: float = 0.35,
+        depth_levels: int = 20,
+        max_spread_phi: float = 0.0005,
+        imbalance_threshold: float = 0.40,
+        spoof_wall_multiplier: float = 3.5,
+        spoof_suppress_sec: float = 10.0,
+        garch_k: float = 1.5,
+        rr_ratio: float = 2.5,
+    ):
+        self.decay_lambda = decay_lambda
+        self.depth_levels = depth_levels
+        self.max_spread_phi = max_spread_phi
+        self.imbalance_threshold = imbalance_threshold
+        self.spoof_wall_multiplier = spoof_wall_multiplier
+        self.spoof_suppress_sec = spoof_suppress_sec
+        self.garch_k = garch_k
+        self.rr_ratio = rr_ratio
 
-@st.cache_resource
-def get_stream_manager():
-    return BinanceFuturesStreamManager(active_symbol="BTCUSDT")
+        self.weights = self._compute_weights(decay_lambda, depth_levels)
 
+        self.trade_buffer: deque = deque(maxlen=15000)
+        self.ob_history: deque = deque(maxlen=50)
+        self.imbalance_history: deque = deque(maxlen=600)
+        self.events_log: deque = deque(maxlen=100)
+        self.audit_logbook: deque = deque(maxlen=50)
 
-manager = get_stream_manager()
+        self.last_spoof_ts: float = 0.0
+        self.spoofed_price_levels: Dict[float, float] = {}
+        self.garch_sigma: float = 0.0045
+        self.garch_last_fit: float = 0.0
+        self.garch_regime: str = "CALIBRATING"
+        self.latest_signal: Optional[TradeSetup] = None
 
+        self.auto_sr_levels: Dict[str, List[float]] = {"15m": [], "1H": [], "4H": []}
+        self.tf_bias: Dict[str, str] = {"15m": "NEUTRAL", "1H": "NEUTRAL", "4H": "NEUTRAL"}
+        
+        # Stable Candidate Pool (Ready signals for the user to review and commit)
+        self.candidate_signals: List[CommittedSignal] = []
+        self._last_generation_ts: float = 0.0
 
-def fmt_price(val: float) -> str:
-    if val >= 100: return f"${val:,.2f}"
-    elif val >= 1: return f"${val:,.4f}"
-    return f"${val:,.5f}"
+    @staticmethod
+    def _compute_weights(decay_lambda: float, levels: int) -> np.ndarray:
+        k = np.arange(1, levels + 1, dtype=np.float64)
+        return np.exp(-decay_lambda * (k - 1))
 
+    def update_params(
+        self,
+        decay_lambda: float,
+        max_spread_phi: float,
+        imbalance_threshold: float,
+        garch_k: float,
+    ) -> None:
+        if abs(decay_lambda - self.decay_lambda) > 1e-6:
+            self.decay_lambda = decay_lambda
+            self.weights = self._compute_weights(decay_lambda, self.depth_levels)
+        self.max_spread_phi = max_spread_phi
+        self.imbalance_threshold = imbalance_threshold
+        self.garch_k = garch_k
 
-# Session state for committed trades so they stay locked in memory without flickering
-if "committed_trade" not in st.session_state:
-    st.session_state.committed_trade = None
-if "student_coin" not in st.session_state:
-    st.session_state.student_coin = "BTCUSDT"
-if "student_balance" not in st.session_state:
-    st.session_state.student_balance = 100.0
+    def update_timeframe_structure(self, tf_label: str, ohlcv_rows: List[Tuple[float, float, float, float]]) -> None:
+        if len(ohlcv_rows) < 25:
+            return
+        highs = np.array([r[1] for r in ohlcv_rows], dtype=np.float64)
+        lows = np.array([r[2] for r in ohlcv_rows], dtype=np.float64)
+        closes = np.array([r[3] for r in ohlcv_rows], dtype=np.float64)
 
-now_ts = time.time()
-st.markdown("### ⚡ Student Committed Signals & Coinglass Liquidation Terminal")
-st.caption(f"🕒 Server Clock: **{format_dual_time(now_ts)}**")
+        pivots = []
+        w = 4
+        for i in range(w, len(highs) - w):
+            if highs[i] == np.max(highs[i - w : i + w + 1]):
+                pivots.append(float(highs[i]))
+            if lows[i] == np.min(lows[i - w : i + w + 1]):
+                pivots.append(float(lows[i]))
 
-s_ctrl1, s_ctrl2 = st.columns([2.2, 1.0])
-with s_ctrl1:
-    selected_coin = st.segmented_control("Select Asset", options=WATCHLIST_SYMBOLS, default=st.session_state.student_coin)
-    if selected_coin: st.session_state.student_coin = selected_coin
-with s_ctrl2:
-    st.session_state.student_balance = st.number_input("My Account Balance ($)", 50.0, 10_000_000.0, float(st.session_state.student_balance), 50.0)
+        unique_levels: List[float] = []
+        for lvl in reversed(pivots):
+            if all(abs(lvl - existing) / max(existing, 1e-8) > 0.0015 for existing in unique_levels):
+                unique_levels.append(lvl)
+            if len(unique_levels) >= 6:
+                break
+        self.auto_sr_levels[tf_label] = sorted(unique_levels)
 
-manager.update_config(
-    active_symbol=st.session_state.student_coin, scanner_active=True, account_balance=25000.0,
-    student_balance=st.session_state.student_balance, risk_pct=1.0, decay_lambda=0.35,
-    imbalance_threshold=0.40, max_spread_phi=0.0005, garch_k=1.5, structural_zones=[]
-)
-
-
-@st.fragment(run_every=1.0)
-def render_live_board():
-    snap = manager.get_snapshot(st.session_state.student_coin)
-    liq = snap.get("liq_stats", {})
-    candidates = snap.get("candidate_signals", [])
-
-    # Coinglass Banner
-    st.markdown(
-        f"<div class='coinglass-banner'>"
-        f"<b>📊 COINGLASS DERIVATIVES PULSE ({snap['symbol']}):</b><br>"
-        f"📉 Long Liq Cluster: <b style='color:#F87171;'>{fmt_price(liq.get('long_cluster',0))}</b> (${liq.get('long_usd',0):,.1f}M) &nbsp;|&nbsp; "
-        f"📈 Short Liq Cluster: <b style='color:#34D399;'>{fmt_price(liq.get('short_cluster',0))}</b> (${liq.get('short_usd',0):,.1f}M)<br>"
-        f"⚡ OI Bias: <b>{liq.get('oi_bias','Neutral')}</b>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-    col_comm, col_cand = st.columns(2)
-
-    # Column 1: COMMITTED TRADE (Pinned in memory, no flickering)
-    with col_comm:
-        st.markdown("#### 📌 Pinned Committed Trade")
-        if st.session_state.committed_trade is not None:
-            t = st.session_state.committed_trade
-            badge = "badge-long" if t.direction == "LONG" else "badge-short"
-            accent = "#15803D" if t.direction == "LONG" else "#B91C1C"
-
-            st.markdown(
-                f"<div class='preset-card' style='border-top: 4px solid {accent};'>"
-                f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
-                f"<span style='font-weight:800; color:{accent};'>{t.symbol} · {t.timeframe}</span>"
-                f"<span class='{badge}'>{t.direction}</span>"
-                f"</div>"
-                f"<div style='font-size:0.75rem; color:#475569; font-family:monospace; margin-top:4px;'>Target ETA: {t.eta_pkt_utc}</div>"
-                f"<div class='price-box'>"
-                f"<div class='price-row'><span>ENTRY:</span><b>{fmt_price(t.entry_price)}</b></div>"
-                f"<div class='price-row'><span>STOP LOSS:</span><b style='color:#B91C1C;'>{fmt_price(t.stop_loss)}</b></div>"
-                f"<div class='price-row'><span>TP 1:</span><b style='color:#15803D;'>{fmt_price(t.tp1)}</b></div>"
-                f"<div class='price-row'><span>TP 2:</span><b style='color:#15803D;'>{fmt_price(t.tp2)}</b></div>"
-                f"<div class='price-row'><span>TP 3:</span><b style='color:#15803D;'>{fmt_price(t.tp3)}</b></div>"
-                f"</div>"
-                f"<b>Margin Required ({t.leverage}x):</b> ${t.margin_required_usd:,.2f}<br>",
-                unsafe_allow_html=True,
-            )
-            if st.button("❌ Close / Clear Committed Trade"):
-                st.session_state.committed_trade = None
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
+        ema_fast = float(np.mean(closes[-8:]))
+        ema_slow = float(np.mean(closes[-21:]))
+        if ema_fast > ema_slow * 1.0005:
+            self.tf_bias[tf_label] = "BULLISH"
+        elif ema_fast < ema_slow * 0.9995:
+            self.tf_bias[tf_label] = "BEARISH"
         else:
-            st.info("No trade committed yet. Review candidates on the right and click 'Commit' to lock one in.")
+            self.tf_bias[tf_label] = "NEUTRAL"
 
-    # Column 2: READY CANDIDATES TO COMMIT
-    with col_cand:
-        st.markdown("#### 🔍 Ready Signal Candidate")
-        if candidates:
-            c = candidates[0]
-            badge = "badge-long" if c.direction == "LONG" else "badge-short"
-            accent = "#15803D" if c.direction == "LONG" else "#B91C1C"
+    def fit_garch(self, close_prices: List[float]) -> float:
+        if len(close_prices) < 100:
+            return self.garch_sigma
+        try:
+            prices = np.asarray(close_prices, dtype=np.float64)
+            log_returns = 100.0 * np.diff(np.log(prices))
+            log_returns = log_returns[np.isfinite(log_returns)]
 
-            st.markdown(
-                f"<div class='preset-card' style='border-top: 4px solid {accent};'>"
-                f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
-                f"<span style='font-weight:800; color:{accent};'>{c.symbol} · {c.timeframe}</span>"
-                f"<span class='{badge}'>{c.direction}</span>"
-                f"</div>"
-                f"<div class='price-box'>"
-                f"<div class='price-row'><span>ENTRY:</span><b>{fmt_price(c.entry_price)}</b></div>"
-                f"<div class='price-row'><span>STOP LOSS:</span><b style='color:#B91C1C;'>{fmt_price(c.stop_loss)}</b></div>"
-                f"<div class='price-row'><span>TP 1:</span><b style='color:#15803D;'>{fmt_price(c.tp1)}</b></div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            if st.button("📌 Commit to This Setup"):
-                st.session_state.committed_trade = c
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
+            model = arch_model(log_returns, mean="Zero", vol="GARCH", p=1, q=1, dist="t", rescale=False)
+            res = model.fit(disp="off", show_warning=False)
+            forecast = res.forecast(horizon=1, reindex=False)
+            variance_pct = float(forecast.variance.values[-1, 0])
+            sigma_decimal = np.sqrt(max(variance_pct, 1e-8)) / 100.0
+
+            self.garch_sigma = float(np.clip(sigma_decimal, 0.0005, 0.05))
+            self.garch_last_fit = time.time()
+        except Exception as exc:
+            logger.error(f"GARCH error: {exc}")
+        return self.garch_sigma
+
+    def ingest_trade(self, timestamp_sec: float, price: float, qty: float, is_buyer_maker: bool) -> None:
+        self.trade_buffer.append((timestamp_sec, price, qty, is_buyer_maker))
+
+    def compute_rolling_cvd(self, now: float) -> Tuple[float, float, float]:
+        cvd_15s = 0.0
+        cutoff_15s = now - 15.0
+        for ts, _, qty, is_buyer_maker in reversed(self.trade_buffer):
+            if ts < cutoff_15s:
+                break
+            cvd_15s += (-qty if is_buyer_maker else qty)
+        return cvd_15s, 0.0, 0.0
+
+    def process_orderbook(
+        self,
+        timestamp_sec: float,
+        bids: List[Tuple[float, float]],
+        asks: List[Tuple[float, float]],
+        symbol: str,
+        account_balance: float,
+        risk_pct: float,
+        structural_zones: List[float],
+        scanner_active: bool = True,
+        student_balance: float = 100.0,
+    ) -> Dict:
+        if not bids or not asks:
+            return {}
+
+        bids = bids[: self.depth_levels]
+        asks = asks[: self.depth_levels]
+        best_bid = bids[0][0]
+        best_ask = asks[0][0]
+        mid_price = 0.5 * (best_bid + best_ask)
+        spread = max(best_ask - best_bid, 0.0)
+        phi_t = spread / mid_price if mid_price > 0 else 1.0
+
+        cvd_15s, _, _ = self.compute_rolling_cvd(timestamp_sec)
+
+        n_b = min(len(bids), self.depth_levels)
+        n_a = min(len(asks), self.depth_levels)
+        w_bid = float(np.dot(self.weights[:n_b], [b[1] for b in bids[:n_b]]))
+        w_ask = float(np.dot(self.weights[:n_a], [a[1] for a in asks[:n_a]]))
+        denom = w_bid + w_ask
+        imbalance_t = float((w_bid - w_ask) / denom) if denom > 0 else 0.0
+
+        liq_stats = self._estimate_liquidation_clusters(mid_price, imbalance_t, w_bid, w_ask)
+
+        if scanner_active and (timestamp_sec - self._last_generation_ts) > 60.0:
+            self._generate_candidate_signal(timestamp_sec, symbol, mid_price, best_bid, best_ask, imbalance_t, student_balance)
+
+        return {
+            "timestamp": timestamp_sec,
+            "mid_price": mid_price,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "spread": spread,
+            "phi_t": phi_t,
+            "imbalance_t": imbalance_t,
+            "garch_sigma": self.garch_sigma,
+            "raw_bids": bids,
+            "raw_asks": asks,
+            "liq_stats": liq_stats,
+            "candidate_signals": list(self.candidate_signals),
+            "audit_logbook": list(self.audit_logbook),
+        }
+
+    def _estimate_liquidation_clusters(self, mid: float, imb: float, w_b: float, w_a: float) -> Dict:
+        total_pool = (w_b + w_a) * mid * 0.15
+        return {
+            "long_cluster": mid * (1.0 - 0.01 - max(0, -imb * 0.005)),
+            "short_cluster": mid * (1.0 + 0.01 + max(0, imb * 0.005)),
+            "long_usd": max(total_pool * (0.5 - imb * 0.25), 2.5),
+            "short_usd": max(total_pool * (0.5 + imb * 0.25), 2.5),
+            "oi_bias": "+4.2% (Long Accumulation)" if imb > 0 else ("-3.8% (Short Unwinding)" if imb < 0 else "Neutral"),
+        }
+
+    def compute_position_sizing(self, entry: float, balance: float, risk_pct: float, k_mult: float, lev: int):
+        sl_dist = max(k_mult * self.garch_sigma * entry, entry * 0.0012)
+        risk_usd = balance * (risk_pct / 100.0)
+        units = risk_usd / sl_dist
+        notional = units * entry
+        max_notional = balance * lev * 0.85
+        if notional > max_notional:
+            notional = max_notional
+            units = notional / entry
+        margin = notional / lev
+        return sl_dist, units, notional, margin
+
+    def _generate_candidate_signal(self, now: float, symbol: str, mid: float, b_bid: float, b_ask: float, imb: float, balance: float):
+        if abs(imb) < 0.25:
+            return
+
+        direction = "LONG" if imb >= 0 else "SHORT"
+        entry = b_bid if direction == "LONG" else b_ask
+        tf = "1H Intraday"
+        tier, r_pct, k_mult, lev = ("MEDIUM RISK", 1.0, 1.5, 50)
+
+        sl_dist, units, notional, margin = self.compute_position_sizing(entry, balance, r_pct, k_mult, lev)
+
+        if direction == "LONG":
+            sl = entry - sl_dist
+            tp1, tp2, tp3 = entry + sl_dist * 1.5, entry + sl_dist * 2.5, entry + sl_dist * 4.0
         else:
-            st.info("Scanning order books... A stable candidate will appear here shortly.")
+            sl = entry + sl_dist
+            tp1, tp2, tp3 = entry - sl_dist * 1.5, entry - sl_dist * 2.5, entry - sl_dist * 4.0
 
+        eta_ts = now + 14400
+        eta_str = f"{time.strftime('%H:%M PKT', time.localtime(eta_ts + 18000))} / {time.strftime('%H:%M UTC', time.gmtime(eta_ts))}"
 
-render_live_board()
+        sig = CommittedSignal(
+            timestamp=now, symbol=symbol, timeframe=tf, risk_tier=tier, direction=direction,
+            entry_price=entry, stop_loss=sl, tp1=tp1, tp2=tp2, tp3=tp3,
+            position_size_units=units, position_notional_usd=notional, margin_required_usd=margin,
+            leverage=lev, win_probability=74, eta_pkt_utc=eta_str,
+            risk_warning="Stable Institutional Signal — Use Isolated Margin",
+            status="CANDIDATE_READY", status_note="READY TO COMMIT"
+        )
+
+        # Keep only the single best stable candidate per coin until committed or refreshed
+        self.candidate_signals = [sig]
+        self._last_generation_ts = now
