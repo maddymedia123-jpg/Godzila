@@ -6,6 +6,8 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 import aiohttp
 import websockets
+import streamlit as st
+from libsql_client import create_client_sync
 from quant_engine import QuantEngine
 
 logger = logging.getLogger("StreamManager")
@@ -37,9 +39,55 @@ class BinanceFuturesStreamManager:
         self.risk_pct: float = 1.0
         self.structural_zones: List[float] = []
 
+        # Initialize Turso Cloud DB connection via Streamlit Secrets
+        self.db = None
+        self._init_turso_db()
+
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run_background_loop, daemon=True)
         self._thread.start()
+
+    def _init_turso_db(self):
+        try:
+            # Pulls automatically from st.secrets['turso'] or we can construct it using your token
+            turso_url = st.secrets.get("turso", {}).get("database_url", "libsql://godzila-db-maddymedia123.turso.io")
+            turso_token = st.secrets.get("turso", {}).get("auth_token", "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTMxMTc0NjYsImlkIjoiMDFhMTdlMWYtMWQwMS03MmNhLTg4MjItNzk1MjY2NDExMTgwIiwia2lkIjoia3l0RU9uVVlMSXBwS3ZQMGVzWEFDR3lYRHM3blFhbmhCQkJiOHdqNDRMayIsInJpZCI6IjRhM2ZhZDUyLTEwMGYtNGE4My1hNTIyLTZkYmViM2E1N2I2NyJ9.eXwFwdN73oP3yarkOIo_ZjEQyR2nTCjUZoEEa3LPYfV48c07sLD4d2ocTstAqAwBiltyAHsVe6osnzbs0pFJAQ")
+            
+            self.db = create_client_sync(url=turso_url, auth_token=turso_token)
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS global_trading_memory (
+                    key TEXT PRIMARY KEY,
+                    payload TEXT,
+                    updated_at REAL
+                );
+            """)
+            logger.info("Successfully connected to Turso Database and verified schema.")
+        except Exception as exc:
+            logger.error(f"Turso DB initialization failed: {exc}")
+
+    def save_state_to_turso(self, key: str, data: dict):
+        if not self.db:
+            return
+        try:
+            payload = json.dumps(data)
+            self.db.execute(
+                "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
+                (key, payload, time.time())
+            )
+        except Exception as exc:
+            logger.error(f"Failed to save to Turso: {exc}")
+
+    def load_state_from_turso(self, key: str) -> Optional[dict]:
+        if not self.db:
+            return None
+        try:
+            res = self.db.execute("SELECT payload FROM global_trading_memory WHERE key = ?;", (key,))
+            rows = res.rows
+            if rows:
+                return json.loads(rows[0][0])
+        except Exception as exc:
+            logger.error(f"Failed to load from Turso: {exc}")
+        return None
 
     def update_config(self, active_symbol: str, scanner_active: bool, account_balance: float, student_balance: float, risk_pct: float, decay_lambda: float, imbalance_threshold: float, max_spread_phi: float, garch_k: float, structural_zones: List[float]):
         sym = active_symbol.upper().strip()
