@@ -13,12 +13,19 @@ logger = logging.getLogger("StreamManager")
 
 class BinanceFuturesStreamManager:
     """
-    Background asyncio worker managing multiplexed Binance USD-M Futures WebSocket
-    streams (depth20@100ms + aggTrade) and periodic 15m REST klines for GARCH calibration.
+    Background asyncio worker managing USD-M Perpetual Futures WebSocket streams
+    (L2 depth + real-time trades) and 15m REST klines for GARCH calibration.
+    Includes automatic failover to Bybit Linear Perps if hosted on a US IP (HTTP 451).
     """
 
-    WS_BASE = "wss://fstream.binance.com/stream"
-    REST_KLINES = "https://fapi.binance.com/fapi/v1/klines"
+    # Binance USD-M Futures routed endpoints
+    BINANCE_WS_PUBLIC = "wss://fstream.binance.com/public/stream"
+    BINANCE_WS_MARKET = "wss://fstream.binance.com/market/stream"
+    BINANCE_REST_KLINES = "https://fapi.binance.com/fapi/v1/klines"
+
+    # Bybit V5 Linear Perpetuals fallback (no US market-data geo-block)
+    BYBIT_WS_LINEAR = "wss://stream.bybit.com/v5/public/linear"
+    BYBIT_REST_KLINES = "https://api.bybit.com/v5/market/kline"
 
     def __init__(self, symbol: str = "BTCUSDT"):
         self.symbol = symbol.upper()
@@ -27,8 +34,13 @@ class BinanceFuturesStreamManager:
         self._lock = threading.Lock()
         self._latest_state: Dict[str, Any] = {}
         self._connection_status: str = "INITIALIZING"
+        self._venue: str = "BINANCE"  # Switches to "BYBIT" automatically on HTTP 451
         self._msg_count: int = 0
         self._last_msg_ts: float = 0.0
+
+        # Local order book state for delta-based feeds
+        self._bids_book: Dict[float, float] = {}
+        self._asks_book: Dict[float, float] = {}
 
         # Configurable runtime parameters synced from UI
         self.account_balance: float = 10000.0
@@ -66,6 +78,8 @@ class BinanceFuturesStreamManager:
             if symbol != self.symbol:
                 logger.info(f"Switching stream symbol from {self.symbol} to {symbol}")
                 self.symbol = symbol
+                self._bids_book.clear()
+                self._asks_book.clear()
                 self.engine = QuantEngine(
                     decay_lambda=decay_lambda,
                     max_spread_phi=max_spread_phi,
@@ -98,29 +112,42 @@ class BinanceFuturesStreamManager:
         self._loop.run_until_complete(self._supervisor())
 
     async def _supervisor(self) -> None:
-        """Runs concurrent GARCH scheduler and resilient WebSocket consumer."""
         garch_task = asyncio.create_task(self._garch_updater_loop())
         ws_task = asyncio.create_task(self._ws_stream_loop())
         await asyncio.gather(garch_task, ws_task)
 
     async def _fetch_historical_klines(self, session: aiohttp.ClientSession, symbol: str) -> List[float]:
-        params = {"symbol": symbol, "interval": "15m", "limit": 500}
+        # Try Binance REST first unless already failed over to Bybit
+        if self._venue == "BINANCE":
+            params = {"symbol": symbol, "interval": "15m", "limit": 500}
+            try:
+                async with session.get(self.BINANCE_REST_KLINES, params=params, timeout=8) as resp:
+                    if resp.status == 451:
+                        logger.warning("Binance REST returned 451 (US geo-block). Switching to Bybit.")
+                        with self._lock:
+                            self._venue = "BYBIT"
+                    elif resp.status == 200:
+                        data = await resp.json()
+                        return [float(candle[4]) for candle in data]
+            except Exception as exc:
+                logger.warning(f"Binance REST unreachable ({exc}), falling back to Bybit klines.")
+                with self._lock:
+                    self._venue = "BYBIT"
+
+        # Bybit V5 Linear 15m Klines fallback
+        bybit_params = {"category": "linear", "symbol": symbol, "interval": "15", "limit": 500}
         try:
-            async with session.get(self.REST_KLINES, params=params, timeout=10) as resp:
-                if resp.status == 429:
-                    logger.warning("Binance REST rate limit hit (429). Backing off...")
-                    await asyncio.sleep(10)
-                    return []
+            async with session.get(self.BYBIT_REST_KLINES, params=bybit_params, timeout=10) as resp:
                 resp.raise_for_status()
-                data = await resp.json()
-                # Kline index 4 is Close price
-                return [float(candle[4]) for candle in data]
+                payload = await resp.json()
+                rows = payload.get("result", {}).get("list", [])
+                # Bybit returns newest candle first; reverse to chronological order (index 4 = close)
+                return [float(candle[4]) for candle in reversed(rows)]
         except Exception as exc:
-            logger.error(f"Failed fetching 15m klines for {symbol}: {exc}")
+            logger.error(f"Failed fetching 15m klines from fallback venue for {symbol}: {exc}")
             return []
 
     async def _garch_updater_loop(self) -> None:
-        """Fetches 15m historical candles immediately on startup/symbol change, then every 15 minutes."""
         last_symbol = None
         last_fetch_ts = 0.0
 
@@ -143,50 +170,82 @@ class BinanceFuturesStreamManager:
                 await asyncio.sleep(2.0)
 
     async def _ws_stream_loop(self) -> None:
-        """Connects to Binance Futures multiplexed WebSocket with exponential backoff."""
         backoff = 1.0
         while not self._stop_event.is_set():
             with self._lock:
-                curr_symbol = self.symbol.lower()
+                curr_symbol = self.symbol
+                venue = self._venue
                 self._restart_stream_flag = False
-                self._connection_status = f"CONNECTING ({curr_symbol.upper()})"
-
-            streams = f"{curr_symbol}@depth20@100ms/{curr_symbol}@aggTrade"
-            url = f"{self.WS_BASE}?streams={streams}"
+                self._connection_status = f"CONNECTING ({venue})"
 
             try:
-                async with websockets.connect(
-                    url,
-                    ping_interval=20,
-                    ping_timeout=20,
-                    close_timeout=5,
-                    max_queue=512,
-                ) as ws:
-                    backoff = 1.0
-                    with self._lock:
-                        self._connection_status = "LIVE (100ms)"
-                    logger.info(f"Connected to Binance Futures WS: {streams}")
-
-                    while not self._stop_event.is_set():
-                        with self._lock:
-                            if self._restart_stream_flag:
-                                break
-
-                        try:
-                            raw_msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
-                        except asyncio.TimeoutError:
-                            continue
-
-                        self._handle_message(raw_msg)
-
+                if venue == "BINANCE":
+                    await self._run_binance_streams(curr_symbol)
+                else:
+                    await self._run_bybit_stream(curr_symbol)
+                backoff = 1.0
             except Exception as exc:
+                err_str = str(exc)
+                if "451" in err_str or "403" in err_str:
+                    logger.warning("Detected US geo-block (HTTP 451/403). Failing over to Bybit Perps...")
+                    with self._lock:
+                        self._venue = "BYBIT"
+                        self._connection_status = "FAILOVER -> BYBIT"
+                    await asyncio.sleep(0.5)
+                    continue
+
                 with self._lock:
                     self._connection_status = f"RECONNECTING ({backoff:.0f}s)"
-                logger.warning(f"WebSocket disconnected ({exc}). Retrying in {backoff:.1f}s...")
+                logger.warning(f"{venue} WebSocket error ({exc}). Retrying in {backoff:.1f}s...")
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, 30.0)
+                backoff = min(backoff * 2.0, 20.0)
 
-    def _handle_message(self, raw_msg: str) -> None:
+    async def _run_binance_streams(self, symbol: str) -> None:
+        """Connects to Binance's routed /public (depth) and /market (aggTrade) endpoints."""
+        s_lower = symbol.lower()
+        depth_url = f"{self.BINANCE_WS_PUBLIC}?streams={s_lower}@depth20@100ms"
+        trade_url = f"{self.BINANCE_WS_MARKET}?streams={s_lower}@aggTrade"
+
+        async with websockets.connect(depth_url, ping_interval=20, ping_timeout=20) as ws_depth, \
+                   websockets.connect(trade_url, ping_interval=20, ping_timeout=20) as ws_trade:
+            with self._lock:
+                self._connection_status = "LIVE BINANCE (100ms)"
+
+            async def consume(ws):
+                while not self._stop_event.is_set():
+                    with self._lock:
+                        if self._restart_stream_flag:
+                            return
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                        self._handle_binance_msg(raw)
+                    except asyncio.TimeoutError:
+                        continue
+
+            await asyncio.gather(consume(ws_depth), consume(ws_trade))
+
+    async def _run_bybit_stream(self, symbol: str) -> None:
+        """Connects to Bybit V5 Linear Perps (orderbook.50 + publicTrade)."""
+        async with websockets.connect(self.BYBIT_WS_LINEAR, ping_interval=20, ping_timeout=20) as ws:
+            sub_msg = {
+                "op": "subscribe",
+                "args": [f"orderbook.50.{symbol}", f"publicTrade.{symbol}"],
+            }
+            await ws.send(json.dumps(sub_msg))
+            with self._lock:
+                self._connection_status = "LIVE BYBIT PERP (US-SAFE)"
+
+            while not self._stop_event.is_set():
+                with self._lock:
+                    if self._restart_stream_flag:
+                        return
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    self._handle_bybit_msg(raw)
+                except asyncio.TimeoutError:
+                    continue
+
+    def _handle_binance_msg(self, raw_msg: str) -> None:
         try:
             payload = json.loads(raw_msg)
             stream = payload.get("stream", "")
@@ -198,33 +257,78 @@ class BinanceFuturesStreamManager:
                 self._last_msg_ts = now
 
                 if "@aggTrade" in stream:
-                    price = float(data["p"])
-                    qty = float(data["q"])
-                    is_buyer_maker = bool(data["m"])
-                    ts_sec = float(data["T"]) / 1000.0
-                    self.engine.ingest_trade(ts_sec, price, qty, is_buyer_maker)
-
+                    self.engine.ingest_trade(
+                        float(data["T"]) / 1000.0,
+                        float(data["p"]),
+                        float(data["q"]),
+                        bool(data["m"]),
+                    )
                 elif "@depth20" in stream:
-                    # Binance Futures depth20 uses 'b' and 'a' keys
                     raw_bids = data.get("b") or data.get("bids") or []
                     raw_asks = data.get("a") or data.get("asks") or []
                     bids = [(float(p), float(q)) for p, q in raw_bids if float(q) > 0]
                     asks = [(float(p), float(q)) for p, q in raw_asks if float(q) > 0]
-
-                    metrics = self.engine.process_orderbook(
-                        timestamp_sec=now,
-                        bids=bids,
-                        asks=asks,
-                        symbol=self.symbol,
-                        account_balance=self.account_balance,
-                        risk_pct=self.risk_pct,
-                        structural_zones=self.structural_zones,
-                    )
-                    if metrics:
-                        self._latest_state = metrics
-
+                    self._update_engine_book(now, bids, asks)
         except Exception as exc:
-            logger.debug(f"Message parse error: {exc}")
+            logger.debug(f"Binance parse error: {exc}")
+
+    def _handle_bybit_msg(self, raw_msg: str) -> None:
+        try:
+            payload = json.loads(raw_msg)
+            topic = payload.get("topic", "")
+            msg_type = payload.get("type", "")
+            data = payload.get("data", {})
+            now = time.time()
+
+            with self._lock:
+                self._msg_count += 1
+                self._last_msg_ts = now
+
+                if topic.startswith("publicTrade."):
+                    for trade in data:
+                        price = float(trade["p"])
+                        qty = float(trade["v"])
+                        # Bybit Side == "Sell" means taker sold into bid -> is_buyer_maker = True
+                        is_buyer_maker = trade["S"] == "Sell"
+                        ts_sec = float(trade["T"]) / 1000.0
+                        self.engine.ingest_trade(ts_sec, price, qty, is_buyer_maker)
+
+                elif topic.startswith("orderbook.50."):
+                    if msg_type == "snapshot":
+                        self._bids_book = {float(p): float(q) for p, q in data.get("b", []) if float(q) > 0}
+                        self._asks_book = {float(p): float(q) for p, q in data.get("a", []) if float(q) > 0}
+                    elif msg_type == "delta":
+                        for p_str, q_str in data.get("b", []):
+                            p, q = float(p_str), float(q_str)
+                            if q == 0.0:
+                                self._bids_book.pop(p, None)
+                            else:
+                                self._bids_book[p] = q
+                        for p_str, q_str in data.get("a", []):
+                            p, q = float(p_str), float(q_str)
+                            if q == 0.0:
+                                self._asks_book.pop(p, None)
+                            else:
+                                self._asks_book[p] = q
+
+                    bids = sorted(self._bids_book.items(), key=lambda x: x[0], reverse=True)[:20]
+                    asks = sorted(self._asks_book.items(), key=lambda x: x[0])[:20]
+                    self._update_engine_book(now, bids, asks)
+        except Exception as exc:
+            logger.debug(f"Bybit parse error: {exc}")
+
+    def _update_engine_book(self, now: float, bids: List, asks: List) -> None:
+        metrics = self.engine.process_orderbook(
+            timestamp_sec=now,
+            bids=bids,
+            asks=asks,
+            symbol=self.symbol,
+            account_balance=self.account_balance,
+            risk_pct=self.risk_pct,
+            structural_zones=self.structural_zones,
+        )
+        if metrics:
+            self._latest_state = metrics
 
     def shutdown(self) -> None:
         self._stop_event.set()
