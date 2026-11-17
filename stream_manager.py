@@ -120,7 +120,7 @@ class BinanceFuturesStreamManager:
                 "status": self._connection_status,
                 "metrics": dict(self._latest_states.get(sym, {})),
                 "liq_stats": eng.process_orderbook(time.time(), [], [], sym, 0, 0, []).get("liq_stats", {}),
-                "candidate_signals": list(eng.candidate_signals),
+               "candidate_signals": list(getattr(eng, "candidate_signals", [])),
                 "audit_logbook": all_audit[:20],
                 "coin_tickers": coin_tickers,
                 "msg_count": self._msg_count,
