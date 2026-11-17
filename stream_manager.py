@@ -21,8 +21,8 @@ OKX_MAP = {
     "DOGEUSDT": "DOGE-USDT-SWAP",
 }
 REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
-PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v6"
-AUDIT_DB_KEY = "godzilla_audit_archive_v6"
+PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v7"
+AUDIT_DB_KEY = "godzilla_audit_archive_v7"
 MAX_ACTIVE_TRADES = 10
 
 
@@ -160,10 +160,11 @@ class BinanceFuturesStreamManager:
                 if (direction == "LONG" and mid_price <= sl) or (direction == "SHORT" and mid_price >= sl):
                     t["sl_hit"] = True
                     changed = True
-                    # Log SL Hit to audit archive
+                    # Immediately log to audit archive if not already recorded
                     audit_entry = dict(t)
                     audit_entry["status_note"] = "STOP-LOSS HIT"
-                    self.audit_archive.insert(0, audit_entry)
+                    if not any(a.get("trade_id") == t.get("trade_id") and a.get("status_note") == "STOP-LOSS HIT" for a in self.audit_archive):
+                        self.audit_archive.insert(0, audit_entry)
                     continue
 
             # If SL is hit, freeze TPs and live tracking
