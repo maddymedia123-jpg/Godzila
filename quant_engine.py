@@ -15,9 +15,9 @@ class CommittedSignal:
     signal_id: str
     timestamp: float
     symbol: str
-    timeframe: str
+    timeframe: str          # "1H" or "4H"
     risk_tier: str
-    direction: str
+    direction: str          # "LONG" or "SHORT"
     entry_price: float
     stop_loss: float
     tp1: float
@@ -33,18 +33,18 @@ class CommittedSignal:
     eta_tp3_str: str
     htf_summary: str
     risk_warning: str
-    entry_status: str = "ENTER NOW (IN ZONE)"  # ENTER NOW (IN ZONE) | TRADE PASSED — WAIT
+    entry_status: str = "ENTER TRADE NOW (IN OPTIMAL ZONE)"
     can_enter: bool = True
     status: str = "CANDIDATE_READY"
 
 
 class QuantEngine:
     """
-    Godzilla Institutional Quantitative Engine:
-    - Strict 4H + 1H HTF trend & RSI confluence (eliminates 15m LONG/SHORT flip-flopping)
-    - L2 Orderbook Exponential Imbalance + Rolling CVD confirmation
-    - Dynamic ATR/GARCH velocity ETAs individually calculated for TP1, TP2, and TP3
-    - Live Entry-Zone Drift Guard (blocks stale/chased entries once price passes entry)
+    Godzilla Dual-Horizon Quantitative Engine:
+    - Decoupled 1H Intraday and 4H Swing scanners (zero cross-timeframe blocking)
+    - Each timeframe combines Structural Momentum (EMA-8/21 + RSI) + Multi-Level L2 OBI + Rolling 60s CVD
+    - Independent Hysteresis Locks (25m on 1H, 90m on 4H) prevent LONG/SHORT flip-flopping
+    - Independent ATR-velocity ETAs for TP1, TP2, TP3 and Live Entry-Zone Drift Guard
     """
 
     def __init__(
@@ -52,7 +52,7 @@ class QuantEngine:
         decay_lambda: float = 0.35,
         depth_levels: int = 20,
         max_spread_phi: float = 0.0008,
-        imbalance_threshold: float = 0.25,
+        imbalance_threshold: float = 0.22,
         garch_k: float = 1.5,
     ):
         self.decay_lambda = decay_lambda
@@ -63,23 +63,27 @@ class QuantEngine:
 
         self.weights = self._compute_weights(decay_lambda, depth_levels)
 
-        self.trade_buffer: deque = deque(maxlen=15000)
+        self.trade_buffer: deque = deque(maxlen=20000)
         self.audit_logbook: deque = deque(maxlen=50)
 
         self.garch_sigma: float = 0.0045
         self.garch_last_fit: float = 0.0
 
-        # Higher-Timeframe Structure (1H & 4H ONLY — 15m excluded from signal triggers)
+        # Independent Timeframe State (1H vs 4H)
         self.auto_sr_levels: Dict[str, List[float]] = {"1H": [], "4H": []}
         self.tf_bias: Dict[str, str] = {"1H": "CALIBRATING", "4H": "CALIBRATING"}
         self.tf_rsi: Dict[str, float] = {"1H": 50.0, "4H": 50.0}
-        self.atr_1h: float = 0.0
+        self.tf_atr: Dict[str, float] = {"1H": 0.0, "4H": 0.0}
 
-        self.candidate_signals: List[CommittedSignal] = []
-        self.regime_status: str = "CALIBRATING HTF STRUCTURE..."
-        self._locked_direction: Optional[str] = None
-        self._direction_lock_ts: float = 0.0
-        self._last_generation_ts: float = 0.0
+        # Independent Signal Slots & Hysteresis Locks per Timeframe
+        self.signals_by_tf: Dict[str, List[CommittedSignal]] = {"1H": [], "4H": []}
+        self.status_by_tf: Dict[str, str] = {
+            "1H": "CALIBRATING 1H CANDLES...",
+            "4H": "CALIBRATING 4H CANDLES...",
+        }
+        self._locked_dir_by_tf: Dict[str, Optional[str]] = {"1H": None, "4H": None}
+        self._lock_ts_by_tf: Dict[str, float] = {"1H": 0.0, "4H": 0.0}
+        self._last_gen_by_tf: Dict[str, float] = {"1H": 0.0, "4H": 0.0}
 
     @staticmethod
     def _compute_weights(decay_lambda: float, levels: int) -> np.ndarray:
@@ -125,10 +129,6 @@ class QuantEngine:
         return float(100.0 - (100.0 / (1.0 + rs)))
 
     def update_timeframe_structure(self, tf_label: str, ohlcv_rows: List[Tuple[float, float, float, float]]) -> None:
-        """
-        Ingests 1H and 4H candles [(open, high, low, close), ...] to establish
-        institutional trend regime, ATR velocity, RSI filter, and swing S/R zones.
-        """
         if tf_label not in ("1H", "4H") or len(ohlcv_rows) < 25:
             return
 
@@ -136,14 +136,14 @@ class QuantEngine:
         lows = np.array([r[2] for r in ohlcv_rows], dtype=np.float64)
         closes = np.array([r[3] for r in ohlcv_rows], dtype=np.float64)
 
-        # True Range & ATR calculation on 1H for realistic TP ETA modeling
-        if tf_label == "1H" and len(closes) >= 15:
+        # True Range & 14-period ATR for this specific timeframe
+        if len(closes) >= 15:
             prev_closes = closes[:-1]
             tr = np.maximum(
                 highs[1:] - lows[1:],
                 np.maximum(np.abs(highs[1:] - prev_closes), np.abs(lows[1:] - prev_closes)),
             )
-            self.atr_1h = float(np.mean(tr[-14:]))
+            self.tf_atr[tf_label] = float(np.mean(tr[-14:]))
 
         # Swing Pivot Detection
         pivots = []
@@ -168,13 +168,13 @@ class QuantEngine:
         rsi_val = self._compute_rsi(closes, 14)
         self.tf_rsi[tf_label] = rsi_val
 
-        # Require both EMA alignment and price confirmation relative to slow EMA
-        if ema_fast > ema_slow * 1.0008 and last_close >= ema_slow:
+        # Decisive directional classification (no wide neutral dead-zone that blocks trades)
+        if ema_fast > ema_slow and last_close >= ema_slow * 0.9985:
             self.tf_bias[tf_label] = "BULLISH"
-        elif ema_fast < ema_slow * 0.9992 and last_close <= ema_slow:
+        elif ema_fast < ema_slow and last_close <= ema_slow * 1.0015:
             self.tf_bias[tf_label] = "BEARISH"
         else:
-            self.tf_bias[tf_label] = "NEUTRAL"
+            self.tf_bias[tf_label] = "BULLISH" if last_close >= ema_fast else "BEARISH"
 
     def fit_garch(self, close_prices: List[float]) -> float:
         if len(close_prices) < 100:
@@ -199,20 +199,16 @@ class QuantEngine:
     def ingest_trade(self, timestamp_sec: float, price: float, qty: float, is_buyer_maker: bool) -> None:
         self.trade_buffer.append((timestamp_sec, price, qty, is_buyer_maker))
 
-    def compute_rolling_cvd(self, now: float) -> float:
-        cvd_15s = 0.0
-        cutoff_15s = now - 15.0
+    def compute_rolling_cvd(self, now: float, window_sec: float = 60.0) -> float:
+        cvd = 0.0
+        cutoff = now - window_sec
         for ts, _, qty, is_buyer_maker in reversed(self.trade_buffer):
-            if ts < cutoff_15s:
+            if ts < cutoff:
                 break
-            cvd_15s += (-qty if is_buyer_maker else qty)
-        return cvd_15s
+            cvd += (-qty if is_buyer_maker else qty)
+        return cvd
 
     def _refresh_signal_entry_gate(self, sig: CommittedSignal, mid_price: float) -> None:
-        """
-        Evaluates live price relative to the signal's Entry Price and TP1.
-        If price has already moved >35% toward TP1 (chased/missed entry), blocks new entry.
-        """
         tp1_dist = abs(sig.tp1 - sig.entry_price)
         if tp1_dist <= 1e-9:
             return
@@ -222,7 +218,7 @@ class QuantEngine:
             if mid_price >= sig.tp1 or drift > tp1_dist * 0.35:
                 sig.entry_status = "TRADE PASSED — DO NOT CHASE (WAIT FOR NEXT SIGNAL)"
                 sig.can_enter = False
-            elif drift < -abs(sig.entry_price - sig.stop_loss) * 0.50:
+            elif drift < -abs(sig.entry_price - sig.stop_loss) * 0.55:
                 sig.entry_status = "PULLBACK NEAR SL — WAIT FOR RECLAIM"
                 sig.can_enter = False
             else:
@@ -233,7 +229,7 @@ class QuantEngine:
             if mid_price <= sig.tp1 or drift > tp1_dist * 0.35:
                 sig.entry_status = "TRADE PASSED — DO NOT CHASE (WAIT FOR NEXT SIGNAL)"
                 sig.can_enter = False
-            elif drift < -abs(sig.stop_loss - sig.entry_price) * 0.50:
+            elif drift < -abs(sig.stop_loss - sig.entry_price) * 0.55:
                 sig.entry_status = "BOUNCE NEAR SL — WAIT FOR REJECTION"
                 sig.can_enter = False
             else:
@@ -263,7 +259,7 @@ class QuantEngine:
         spread = max(best_ask - best_bid, 0.0)
         phi_t = spread / mid_price if mid_price > 0 else 1.0
 
-        cvd_15s = self.compute_rolling_cvd(timestamp_sec)
+        cvd_60s = self.compute_rolling_cvd(timestamp_sec, 60.0)
 
         n_b = min(len(bids), self.depth_levels)
         n_a = min(len(asks), self.depth_levels)
@@ -274,14 +270,17 @@ class QuantEngine:
 
         liq_stats = self._estimate_liquidation_clusters(mid_price, imbalance_t, w_bid, w_ask)
 
-        # Continuously update live entry validity on any existing signal
-        for existing_sig in self.candidate_signals:
-            self._refresh_signal_entry_gate(existing_sig, mid_price)
+        # Update live entry-zone drift gate for both 1H and 4H signals
+        for tf_key in ("1H", "4H"):
+            for existing_sig in self.signals_by_tf[tf_key]:
+                self._refresh_signal_entry_gate(existing_sig, mid_price)
 
         if scanner_active:
-            self._evaluate_institutional_signal(
-                timestamp_sec, symbol, mid_price, best_bid, best_ask, phi_t, imbalance_t, cvd_15s, student_balance
-            )
+            # Run 1H and 4H scanners independently!
+            for tf_key in ("1H", "4H"):
+                self._evaluate_tf_signal(
+                    tf_key, timestamp_sec, symbol, mid_price, best_bid, best_ask, phi_t, imbalance_t, cvd_60s, student_balance
+                )
 
         return {
             "timestamp": timestamp_sec,
@@ -291,35 +290,38 @@ class QuantEngine:
             "spread": spread,
             "phi_t": phi_t,
             "imbalance_t": imbalance_t,
-            "cvd_15s": cvd_15s,
+            "cvd_15s": cvd_60s,
             "garch_sigma": self.garch_sigma,
-            "atr_1h": self.atr_1h,
             "tf_bias": dict(self.tf_bias),
             "tf_rsi": dict(self.tf_rsi),
-            "regime_status": self.regime_status,
+            "tf_atr": dict(self.tf_atr),
             "raw_bids": bids,
             "raw_asks": asks,
             "liq_stats": liq_stats,
-            "candidate_signals": list(self.candidate_signals),
+            "signals_1h": list(self.signals_by_tf["1H"]),
+            "signals_4h": list(self.signals_by_tf["4H"]),
+            "status_1h": self.status_by_tf["1H"],
+            "status_4h": self.status_by_tf["4H"],
             "audit_logbook": list(self.audit_logbook),
         }
 
     def _estimate_liquidation_clusters(self, mid: float, imb: float, w_b: float, w_a: float) -> Dict:
         total_pool = (w_b + w_a) * mid * 0.15
-        bias_4h = self.tf_bias.get("4H", "NEUTRAL")
-        bias_1h = self.tf_bias.get("1H", "NEUTRAL")
         return {
             "long_cluster": mid * (1.0 - 0.012 - max(0, -imb * 0.005)),
             "short_cluster": mid * (1.0 + 0.012 + max(0, imb * 0.005)),
             "long_usd": max(total_pool * (0.5 - imb * 0.25), 2.5),
             "short_usd": max(total_pool * (0.5 + imb * 0.25), 2.5),
-            "oi_bias": f"4H: {bias_4h} | 1H: {bias_1h}",
+            "oi_bias": f"1H: {self.tf_bias['1H']} | 4H: {self.tf_bias['4H']}",
         }
 
-    def compute_position_sizing(self, entry: float, balance: float, risk_pct: float, k_mult: float, lev: int):
-        # Use 1H ATR if available, otherwise GARCH sigma floor
-        vol_unit = max(self.atr_1h * 0.65, k_mult * self.garch_sigma * entry, entry * 0.0035)
-        sl_dist = vol_unit
+    def compute_tf_position_sizing(self, tf_label: str, entry: float, balance: float, risk_pct: float, lev: int):
+        atr_val = self.tf_atr.get(tf_label, 0.0)
+        if tf_label == "1H":
+            sl_dist = max(atr_val * 0.70, self.garch_k * self.garch_sigma * entry, entry * 0.0035)
+        else:
+            sl_dist = max(atr_val * 0.85, self.garch_k * self.garch_sigma * entry * 1.8, entry * 0.0075)
+
         risk_usd = balance * (risk_pct / 100.0)
         units = risk_usd / sl_dist
         notional = units * entry
@@ -331,15 +333,16 @@ class QuantEngine:
         return sl_dist, units, notional, margin
 
     @staticmethod
-    def _format_eta(now_ts: float, hours_ahead: float) -> str:
-        clamped_hours = float(np.clip(hours_ahead, 0.35, 36.0))
+    def _format_eta(now_ts: float, hours_ahead: float, min_h: float, max_h: float) -> str:
+        clamped_hours = float(np.clip(hours_ahead, min_h, max_h))
         target_ts = now_ts + (clamped_hours * 3600.0)
         pkt_dt = datetime.fromtimestamp(target_ts + 18000, tz=timezone.utc)
         utc_dt = datetime.fromtimestamp(target_ts, tz=timezone.utc)
         return f"~{clamped_hours:.1f}h ({pkt_dt.strftime('%H:%M PKT')} / {utc_dt.strftime('%H:%M UTC')})"
 
-    def _evaluate_institutional_signal(
+    def _evaluate_tf_signal(
         self,
+        tf_label: str,
         now: float,
         symbol: str,
         mid: float,
@@ -347,92 +350,97 @@ class QuantEngine:
         b_ask: float,
         phi_t: float,
         imb: float,
-        cvd_15s: float,
+        cvd_60s: float,
         balance: float,
     ) -> None:
-        bias_4h = self.tf_bias.get("4H", "CALIBRATING")
-        bias_1h = self.tf_bias.get("1H", "CALIBRATING")
-        rsi_1h = self.tf_rsi.get("1H", 50.0)
+        bias = self.tf_bias.get(tf_label, "CALIBRATING")
+        rsi_val = self.tf_rsi.get(tf_label, 50.0)
+        atr_val = self.tf_atr.get(tf_label, 0.0)
 
-        if bias_4h == "CALIBRATING" or bias_1h == "CALIBRATING":
-            self.regime_status = "CALIBRATING 1H & 4H CANDLE STRUCTURE..."
+        if bias == "CALIBRATING":
+            self.status_by_tf[tf_label] = f"CALIBRATING {tf_label} CANDLE STRUCTURE..."
             return
 
-        # 1. Strict HTF Alignment Gate (4H + 1H must agree — zero 15m noise)
-        if bias_4h != bias_1h or bias_4h == "NEUTRAL":
-            self.regime_status = f"HTF REGIME CONFLICT (4H: {bias_4h} vs 1H: {bias_1h}) — STANDING ASIDE"
+        direction = "LONG" if bias == "BULLISH" else "SHORT"
+        cooldown_sec = 1500.0 if tf_label == "1H" else 5400.0  # 25m on 1H, 90m on 4H
+
+        # 1. Per-Timeframe Directional Hysteresis Lock (prevents flip-flopping on that timeframe)
+        locked_dir = self._locked_dir_by_tf[tf_label]
+        lock_ts = self._lock_ts_by_tf[tf_label]
+        if locked_dir is not None and locked_dir != direction and (now - lock_ts) < cooldown_sec:
+            mins_left = int((cooldown_sec - (now - lock_ts)) / 60)
+            self.status_by_tf[tf_label] = f"{tf_label} LOCKED {locked_dir} ({mins_left}m hysteresis cooldown)"
             return
 
-        htf_dir = "LONG" if bias_4h == "BULLISH" else "SHORT"
-
-        # 2. 45-Minute Directional Hysteresis Lock (prevents flip-flopping)
-        if (
-            self._locked_direction is not None
-            and self._locked_direction != htf_dir
-            and (now - self._direction_lock_ts) < 2700.0
-        ):
-            mins_left = int((2700.0 - (now - self._direction_lock_ts)) / 60)
-            self.regime_status = f"DIRECTION LOCKED {self._locked_direction} ({mins_left}m cooldown before reversal)"
+        # 2. RSI Exhaustion Filter
+        if direction == "LONG" and rsi_val > 74.0:
+            self.status_by_tf[tf_label] = f"{tf_label} BULLISH, BUT RSI OVERBOUGHT ({rsi_val:.1f}) — WAITING FOR PULLBACK"
+            return
+        if direction == "SHORT" and rsi_val < 26.0:
+            self.status_by_tf[tf_label] = f"{tf_label} BEARISH, BUT RSI OVERSOLD ({rsi_val:.1f}) — WAITING FOR BOUNCE"
             return
 
-        # 3. Exhaustion RSI Guard (do not buy extreme overbought or short extreme oversold)
-        if htf_dir == "LONG" and rsi_1h > 72.0:
-            self.regime_status = f"4H/1H BULLISH, BUT 1H RSI OVERBOUGHT ({rsi_1h:.1f}) — WAITING FOR PULLBACK"
-            return
-        if htf_dir == "SHORT" and rsi_1h < 28.0:
-            self.regime_status = f"4H/1H BEARISH, BUT 1H RSI OVERSOLD ({rsi_1h:.1f}) — WAITING FOR BOUNCE"
-            return
-
-        # 4. Orderbook Imbalance + Spread + CVD Microstructure Confirmation
+        # 3. Spread & Orderbook / CVD Flow Confirmation
         if phi_t > self.max_spread_phi:
-            self.regime_status = f"SPREAD TOO WIDE ({phi_t:.5f}) — FILTERED"
+            self.status_by_tf[tf_label] = f"{tf_label} SPREAD WIDE ({phi_t:.5f}) — FILTERED"
             return
 
-        thresh = max(self.imbalance_threshold, 0.22)
-        if htf_dir == "LONG" and (imb < thresh or cvd_15s < 0):
-            self.regime_status = f"4H/1H BULLISH ({htf_dir}) — WAITING FOR BID ABSORPTION (Imb: {imb:+.2f})"
+        req_imb = max(self.imbalance_threshold, 0.18) if tf_label == "1H" else max(self.imbalance_threshold * 0.85, 0.15)
+        if direction == "LONG" and (imb < req_imb and cvd_60s <= 0):
+            self.status_by_tf[tf_label] = f"{tf_label} BULLISH BIAS — WAITING FOR BUY FLOW (L2 Imb: {imb:+.2f})"
             return
-        if htf_dir == "SHORT" and (imb > -thresh or cvd_15s > 0):
-            self.regime_status = f"4H/1H BEARISH ({htf_dir}) — WAITING FOR ASK DISTRIBUTION (Imb: {imb:+.2f})"
+        if direction == "SHORT" and (imb > -req_imb and cvd_60s >= 0):
+            self.status_by_tf[tf_label] = f"{tf_label} BEARISH BIAS — WAITING FOR SELL FLOW (L2 Imb: {imb:+.2f})"
             return
 
-        self.regime_status = f"CONFIRMED INSTITUTIONAL {htf_dir} REGIME (4H + 1H + L2 FLOW ALIGNED)"
+        self.status_by_tf[tf_label] = f"ACTIVE {tf_label} {direction} SIGNAL ({tf_label} STRUCTURE + FLOW ALIGNED)"
 
-        # Avoid regenerating identical setup within 10 minutes unless prior signal passed
-        if self.candidate_signals and (now - self._last_generation_ts) < 600.0:
-            if self.candidate_signals[0].direction == htf_dir and self.candidate_signals[0].can_enter:
+        # Keep existing valid signal active for 10m (1H) or 30m (4H) unless price passed entry
+        regen_window = 600.0 if tf_label == "1H" else 1800.0
+        existing = self.signals_by_tf[tf_label]
+        if existing and (now - self._last_gen_by_tf[tf_label]) < regen_window:
+            if existing[0].direction == direction and existing[0].can_enter:
                 return
 
-        entry = b_bid if htf_dir == "LONG" else b_ask
-        sl_dist, units, notional, margin = self.compute_position_sizing(entry, balance, 1.0, self.garch_k, 25)
+        entry = b_bid if direction == "LONG" else b_ask
+        lev = 30 if tf_label == "1H" else 15
+        sl_dist, units, notional, margin = self.compute_tf_position_sizing(tf_label, entry, balance, 1.0, lev)
 
-        if htf_dir == "LONG":
+        if direction == "LONG":
             sl = entry - sl_dist
-            tp1 = entry + sl_dist * 1.4
-            tp2 = entry + sl_dist * 2.4
-            tp3 = entry + sl_dist * 3.8
+            tp1 = entry + sl_dist * 1.35
+            tp2 = entry + sl_dist * 2.30
+            tp3 = entry + sl_dist * 3.60
         else:
             sl = entry + sl_dist
-            tp1 = entry - sl_dist * 1.4
-            tp2 = entry - sl_dist * 2.4
-            tp3 = entry - sl_dist * 3.8
+            tp1 = entry - sl_dist * 1.35
+            tp2 = entry - sl_dist * 2.30
+            tp3 = entry - sl_dist * 3.60
 
-        # Realistic per-TP ETA using 1H ATR velocity
-        hourly_velocity = max(self.atr_1h * 0.45, mid * self.garch_sigma * 2.2, mid * 0.0025)
-        eta_tp1 = self._format_eta(now, abs(tp1 - entry) / hourly_velocity)
-        eta_tp2 = self._format_eta(now, abs(tp2 - entry) / hourly_velocity)
-        eta_tp3 = self._format_eta(now, abs(tp3 - entry) / hourly_velocity)
+        # Distinct Velocity & ETA horizons for 1H Intraday vs 4H Swing
+        if tf_label == "1H":
+            vel = max(atr_val * 0.50, mid * self.garch_sigma * 2.4, mid * 0.0025)
+            eta_tp1 = self._format_eta(now, abs(tp1 - entry) / vel, 0.5, 4.0)
+            eta_tp2 = self._format_eta(now, abs(tp2 - entry) / vel, 1.5, 8.0)
+            eta_tp3 = self._format_eta(now, abs(tp3 - entry) / vel, 3.0, 14.0)
+            tier = "1H INTRADAY MOMENTUM"
+        else:
+            vel = max((atr_val / 4.0) * 0.55, mid * self.garch_sigma * 2.0, mid * 0.0020)
+            eta_tp1 = self._format_eta(now, abs(tp1 - entry) / vel, 2.5, 12.0)
+            eta_tp2 = self._format_eta(now, abs(tp2 - entry) / vel, 6.0, 24.0)
+            eta_tp3 = self._format_eta(now, abs(tp3 - entry) / vel, 12.0, 42.0)
+            tier = "4H SWING STRUCTURE"
 
-        win_prob = min(84, int(68 + abs(imb) * 20))
-        sig_id = f"{symbol}_{htf_dir}_{int(now)}"
+        win_prob = min(84, int(67 + abs(imb) * 22))
+        sig_id = f"{symbol}_{tf_label}_{direction}_{int(now)}"
 
         sig = CommittedSignal(
             signal_id=sig_id,
             timestamp=now,
             symbol=symbol,
-            timeframe="4H Macro + 1H Structure",
-            risk_tier="INSTITUTIONAL CONFLUENCE",
-            direction=htf_dir,
+            timeframe=tf_label,
+            risk_tier=tier,
+            direction=direction,
             entry_price=entry,
             stop_loss=sl,
             tp1=tp1,
@@ -441,22 +449,22 @@ class QuantEngine:
             position_size_units=units,
             position_notional_usd=notional,
             margin_required_usd=margin,
-            leverage=25,
+            leverage=lev,
             win_probability=win_prob,
             eta_tp1_str=eta_tp1,
             eta_tp2_str=eta_tp2,
             eta_tp3_str=eta_tp3,
-            htf_summary=f"4H {bias_4h} · 1H {bias_1h} (RSI {rsi_1h:.0f}) · L2 Imb {imb:+.2f}",
-            risk_warning="Isolated Margin · Shared SL · Move SL to Breakeven at TP1",
+            htf_summary=f"{tf_label} {bias} (RSI {rsi_val:.0f}) · L2 Imb {imb:+.2f} · 60s CVD {cvd_60s:+.1f}",
+            risk_warning=f"{tf_label} Isolated Margin · Shared SL · Trail SL to Entry at TP1",
             entry_status="ENTER TRADE NOW (IN OPTIMAL ZONE)",
             can_enter=True,
             status="CANDIDATE_READY",
         )
 
-        self.candidate_signals = [sig]
-        self._locked_direction = htf_dir
-        self._direction_lock_ts = now
-        self._last_generation_ts = now
+        self.signals_by_tf[tf_label] = [sig]
+        self._locked_dir_by_tf[tf_label] = direction
+        self._lock_ts_by_tf[tf_label] = now
+        self._last_gen_by_tf[tf_label] = now
         self.audit_logbook.appendleft(
-            f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC] {symbol} {htf_dir} confirmed @ {entry:.4f} | 4H={bias_4h}, 1H={bias_1h}"
+            f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC] [{tf_label}] {symbol} {direction} @ {entry:.4f} | RSI={rsi_val:.1f}, Imb={imb:+.2f}"
         )
