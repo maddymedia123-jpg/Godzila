@@ -1,5 +1,5 @@
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 from collections import deque
 from dataclasses import dataclass
@@ -15,9 +15,9 @@ class CommittedSignal:
     signal_id: str
     timestamp: float
     symbol: str
-    timeframe: str          # "1H" or "4H"
+    timeframe: str
     risk_tier: str
-    direction: str          # "LONG" or "SHORT"
+    direction: str
     entry_price: float
     stop_loss: float
     tp1: float
@@ -39,14 +39,6 @@ class CommittedSignal:
 
 
 class QuantEngine:
-    """
-    Godzilla Dual-Horizon Quantitative Engine:
-    - Decoupled 1H Intraday and 4H Swing scanners (zero cross-timeframe blocking)
-    - Each timeframe combines Structural Momentum (EMA-8/21 + RSI) + Multi-Level L2 OBI + Rolling 60s CVD
-    - Independent Hysteresis Locks (25m on 1H, 90m on 4H) prevent LONG/SHORT flip-flopping
-    - Independent ATR-velocity ETAs for TP1, TP2, TP3 and Live Entry-Zone Drift Guard
-    """
-
     def __init__(
         self,
         decay_lambda: float = 0.35,
@@ -62,20 +54,17 @@ class QuantEngine:
         self.garch_k = garch_k
 
         self.weights = self._compute_weights(decay_lambda, depth_levels)
-
         self.trade_buffer: deque = deque(maxlen=20000)
         self.audit_logbook: deque = deque(maxlen=50)
 
         self.garch_sigma: float = 0.0045
         self.garch_last_fit: float = 0.0
 
-        # Independent Timeframe State (1H vs 4H)
         self.auto_sr_levels: Dict[str, List[float]] = {"1H": [], "4H": []}
         self.tf_bias: Dict[str, str] = {"1H": "CALIBRATING", "4H": "CALIBRATING"}
         self.tf_rsi: Dict[str, float] = {"1H": 50.0, "4H": 50.0}
         self.tf_atr: Dict[str, float] = {"1H": 0.0, "4H": 0.0}
 
-        # Independent Signal Slots & Hysteresis Locks per Timeframe
         self.signals_by_tf: Dict[str, List[CommittedSignal]] = {"1H": [], "4H": []}
         self.status_by_tf: Dict[str, str] = {
             "1H": "CALIBRATING 1H CANDLES...",
@@ -136,7 +125,6 @@ class QuantEngine:
         lows = np.array([r[2] for r in ohlcv_rows], dtype=np.float64)
         closes = np.array([r[3] for r in ohlcv_rows], dtype=np.float64)
 
-        # True Range & 14-period ATR for this specific timeframe
         if len(closes) >= 15:
             prev_closes = closes[:-1]
             tr = np.maximum(
@@ -145,7 +133,6 @@ class QuantEngine:
             )
             self.tf_atr[tf_label] = float(np.mean(tr[-14:]))
 
-        # Swing Pivot Detection
         pivots = []
         w = 3
         for i in range(w, len(highs) - w):
@@ -168,7 +155,6 @@ class QuantEngine:
         rsi_val = self._compute_rsi(closes, 14)
         self.tf_rsi[tf_label] = rsi_val
 
-        # Decisive directional classification (no wide neutral dead-zone that blocks trades)
         if ema_fast > ema_slow and last_close >= ema_slow * 0.9985:
             self.tf_bias[tf_label] = "BULLISH"
         elif ema_fast < ema_slow and last_close <= ema_slow * 1.0015:
@@ -270,13 +256,11 @@ class QuantEngine:
 
         liq_stats = self._estimate_liquidation_clusters(mid_price, imbalance_t, w_bid, w_ask)
 
-        # Update live entry-zone drift gate for both 1H and 4H signals
         for tf_key in ("1H", "4H"):
             for existing_sig in self.signals_by_tf[tf_key]:
                 self._refresh_signal_entry_gate(existing_sig, mid_price)
 
         if scanner_active:
-            # Run 1H and 4H scanners independently!
             for tf_key in ("1H", "4H"):
                 self._evaluate_tf_signal(
                     tf_key, timestamp_sec, symbol, mid_price, best_bid, best_ask, phi_t, imbalance_t, cvd_60s, student_balance
@@ -337,8 +321,14 @@ class QuantEngine:
         clamped_hours = float(np.clip(hours_ahead, min_h, max_h))
         target_ts = now_ts + (clamped_hours * 3600.0)
         pkt_dt = datetime.fromtimestamp(target_ts + 18000, tz=timezone.utc)
-        utc_dt = datetime.fromtimestamp(target_ts, tz=timezone.utc)
-        return f"~{clamped_hours:.1f}h ({pkt_dt.strftime('%H:%M PKT')} / {utc_dt.strftime('%H:%M UTC')})"
+        now_pkt_day = datetime.fromtimestamp(now_ts + 18000, tz=timezone.utc).day
+        target_pkt_day = pkt_dt.day
+
+        if target_pkt_day != now_pkt_day:
+            time_str = f"{pkt_dt.strftime('%a %H:%M PKT')}"
+        else:
+            time_str = f"{pkt_dt.strftime('%H:%M PKT')}"
+        return f"~{clamped_hours:.1f}h ({time_str})"
 
     def _evaluate_tf_signal(
         self,
@@ -362,9 +352,8 @@ class QuantEngine:
             return
 
         direction = "LONG" if bias == "BULLISH" else "SHORT"
-        cooldown_sec = 1500.0 if tf_label == "1H" else 5400.0  # 25m on 1H, 90m on 4H
+        cooldown_sec = 1500.0 if tf_label == "1H" else 5400.0
 
-        # 1. Per-Timeframe Directional Hysteresis Lock (prevents flip-flopping on that timeframe)
         locked_dir = self._locked_dir_by_tf[tf_label]
         lock_ts = self._lock_ts_by_tf[tf_label]
         if locked_dir is not None and locked_dir != direction and (now - lock_ts) < cooldown_sec:
@@ -372,7 +361,6 @@ class QuantEngine:
             self.status_by_tf[tf_label] = f"{tf_label} LOCKED {locked_dir} ({mins_left}m hysteresis cooldown)"
             return
 
-        # 2. RSI Exhaustion Filter
         if direction == "LONG" and rsi_val > 74.0:
             self.status_by_tf[tf_label] = f"{tf_label} BULLISH, BUT RSI OVERBOUGHT ({rsi_val:.1f}) — WAITING FOR PULLBACK"
             return
@@ -380,7 +368,6 @@ class QuantEngine:
             self.status_by_tf[tf_label] = f"{tf_label} BEARISH, BUT RSI OVERSOLD ({rsi_val:.1f}) — WAITING FOR BOUNCE"
             return
 
-        # 3. Spread & Orderbook / CVD Flow Confirmation
         if phi_t > self.max_spread_phi:
             self.status_by_tf[tf_label] = f"{tf_label} SPREAD WIDE ({phi_t:.5f}) — FILTERED"
             return
@@ -395,7 +382,6 @@ class QuantEngine:
 
         self.status_by_tf[tf_label] = f"ACTIVE {tf_label} {direction} SIGNAL ({tf_label} STRUCTURE + FLOW ALIGNED)"
 
-        # Keep existing valid signal active for 10m (1H) or 30m (4H) unless price passed entry
         regen_window = 600.0 if tf_label == "1H" else 1800.0
         existing = self.signals_by_tf[tf_label]
         if existing and (now - self._last_gen_by_tf[tf_label]) < regen_window:
@@ -417,7 +403,6 @@ class QuantEngine:
             tp2 = entry - sl_dist * 2.30
             tp3 = entry - sl_dist * 3.60
 
-        # Distinct Velocity & ETA horizons for 1H Intraday vs 4H Swing
         if tf_label == "1H":
             vel = max(atr_val * 0.50, mid * self.garch_sigma * 2.4, mid * 0.0025)
             eta_tp1 = self._format_eta(now, abs(tp1 - entry) / vel, 0.5, 4.0)
