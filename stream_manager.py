@@ -52,14 +52,13 @@ class BinanceFuturesStreamManager:
 
     def _init_turso_db(self):
         try:
-            raw_url = st.secrets.get("turso", {}).get("database_url", "libsql://godzila-db-maddymedia123.turso.io")
-            turso_url = raw_url.replace("libsql://", "https://").replace("wss://", "https://")
-            turso_token = st.secrets.get("turso", {}).get("auth_token", "")
-
-            if not turso_token:
-                logger.warning("No Turso auth_token found in st.secrets; running with local session memory.")
+            turso_sec = st.secrets.get("turso", {})
+            raw_url = turso_sec.get("database_url", "")
+            turso_token = turso_sec.get("auth_token", "")
+            if not raw_url or not turso_token:
                 return
 
+            turso_url = raw_url.replace("libsql://", "https://").replace("wss://", "https://")
             self.db = create_client_sync(url=turso_url, auth_token=turso_token)
             self.db.execute("""
                 CREATE TABLE IF NOT EXISTS global_trading_memory (
@@ -69,7 +68,7 @@ class BinanceFuturesStreamManager:
                 );
             """)
         except Exception as exc:
-            logger.error(f"Turso DB initialization failed: {exc}")
+            logger.error(f"Turso DB disabled (using local session memory): {exc}")
             self.db = None
 
     def save_state_to_turso(self, key: str, data: dict):
@@ -93,8 +92,8 @@ class BinanceFuturesStreamManager:
             if rows:
                 return json.loads(rows[0][0])
         except Exception as exc:
-            logger.error(f"Failed to load from Turso: {exc}")
-            self.db = None  # Stop spamming 404s if DB URL/token is invalid
+            logger.error(f"Turso read failed, switching to local memory: {exc}")
+            self.db = None
         return None
 
     def update_config(
