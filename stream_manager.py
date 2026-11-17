@@ -21,8 +21,8 @@ OKX_MAP = {
     "DOGEUSDT": "DOGE-USDT-SWAP",
 }
 REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
-PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v1"
-MAX_ACTIVE_TRADES = 8
+PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v2"
+MAX_ACTIVE_TRADES = 10
 
 
 class BinanceFuturesStreamManager:
@@ -104,28 +104,28 @@ class BinanceFuturesStreamManager:
             if len(self.active_trades) >= MAX_ACTIVE_TRADES:
                 return False, f"Maximum {MAX_ACTIVE_TRADES} active trades reached. Kill an existing trade first."
 
-            # Prevent duplicate active trade on same symbol + direction
+            # Allow independent 1H and 4H trades on the same coin, but prevent exact duplicate (symbol + timeframe + direction)
             for existing in self.active_trades:
-                if existing.get("symbol") == trade_payload.get("symbol") and existing.get("direction") == trade_payload.get("direction"):
-                    return False, f"Active {trade_payload.get('direction')} trade already locked for {trade_payload.get('symbol')}."
+                if (
+                    existing.get("symbol") == trade_payload.get("symbol")
+                    and existing.get("timeframe") == trade_payload.get("timeframe")
+                    and existing.get("direction") == trade_payload.get("direction")
+                ):
+                    return False, f"Active {trade_payload.get('timeframe')} {trade_payload.get('direction')} trade already locked for {trade_payload.get('symbol')}."
 
-            trade_payload.setdefault("trade_id", f"{trade_payload['symbol']}_{int(time.time()*1000)}")
+            trade_payload.setdefault("trade_id", f"{trade_payload['symbol']}_{trade_payload.get('timeframe', '1H')}_{int(time.time()*1000)}")
             trade_payload.setdefault("tp1_hit", False)
             trade_payload.setdefault("tp2_hit", False)
             trade_payload.setdefault("tp3_hit", False)
             trade_payload.setdefault("sl_hit", False)
             self.active_trades.append(trade_payload)
             self._save_portfolio_to_turso()
-            return True, f"Committed {trade_payload['symbol']} {trade_payload['direction']} to Godzilla Cloud Tracker."
+            return True, f"Committed [{trade_payload.get('timeframe')}] {trade_payload['symbol']} {trade_payload['direction']} to Godzilla Cloud Tracker."
 
     def kill_trade(self, trade_id: str) -> None:
         with self._lock:
             self.active_trades = [t for t in self.active_trades if t.get("trade_id") != trade_id]
             self._save_portfolio_to_turso()
-
-    def get_active_trades(self) -> List[Dict[str, Any]]:
-        with self._lock:
-            return [dict(t) for t in self.active_trades]
 
     def _update_active_trades_telemetry(self, symbol: str, mid_price: float) -> None:
         if mid_price <= 0:
@@ -222,12 +222,14 @@ class BinanceFuturesStreamManager:
                 "status": self._connection_status,
                 "metrics": latest,
                 "liq_stats": latest.get("liq_stats", {}),
-                "candidate_signals": list(getattr(eng, "candidate_signals", [])),
-                "regime_status": getattr(eng, "regime_status", "CALIBRATING..."),
-                "tf_bias": dict(getattr(eng, "tf_bias", {})),
-                "tf_rsi": dict(getattr(eng, "tf_rsi", {})),
+                "signals_1h": list(eng.signals_by_tf.get("1H", [])),
+                "signals_4h": list(eng.signals_by_tf.get("4H", [])),
+                "status_1h": eng.status_by_tf.get("1H", "CALIBRATING..."),
+                "status_4h": eng.status_by_tf.get("4H", "CALIBRATING..."),
+                "tf_bias": dict(eng.tf_bias),
+                "tf_rsi": dict(eng.tf_rsi),
                 "active_trades": [dict(t) for t in self.active_trades],
-                "audit_logbook": all_audit[:20],
+                "audit_logbook": all_audit[:25],
                 "coin_tickers": coin_tickers,
                 "msg_count": self._msg_count,
             }
@@ -244,7 +246,6 @@ class BinanceFuturesStreamManager:
                     for sym in WATCHLIST_SYMBOLS:
                         inst_id = OKX_MAP[sym]
 
-                        # 1. 4H & 1H Higher-Timeframe Structure Candles
                         for bar_tf in ("4H", "1H"):
                             try:
                                 async with session.get(
@@ -264,7 +265,6 @@ class BinanceFuturesStreamManager:
                             except Exception:
                                 pass
 
-                        # 2. 15m Candles ONLY for GARCH Volatility Calibration
                         try:
                             async with session.get(
                                 self.OKX_REST_CANDLES,
@@ -280,7 +280,6 @@ class BinanceFuturesStreamManager:
                         except Exception:
                             pass
 
-                        # 3. Initial REST Orderbook Seed
                         try:
                             async with session.get(
                                 self.OKX_REST_BOOKS,
