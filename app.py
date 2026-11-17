@@ -265,13 +265,13 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
             with cols[4]:
                 if sl_hit:
-                    st.markdown("<div style='font-size:13px;color:#94a3b8;font-weight:700;padding-top:14px;'>Target tracking halted at SL.</div>", unsafe_allow_html=True)
+                    st.markdown("<div style='font-size:13px;color:#ffffff;font-weight:700;padding-top:14px;'>Target tracking halted at SL.</div>", unsafe_allow_html=True)
                 else:
                     st.markdown(f"""
                     <div style="font-size:13px;line-height:1.7;color:#ffffff;font-weight:700;padding-top:2px;">
-                        <div><span style="color:#94a3b8;">TP1:</span> <strong style="color:#ffffff;">{fmt_px(t_tp1)}</strong><br/><span style='color:#38bdf8;font-size:12px;font-weight:700;'>🕒 {eta1}</span></div>
-                        <div><span style="color:#94a3b8;">TP2:</span> <strong style="color:#ffffff;">{fmt_px(t_tp2)}</strong><br/><span style='color:#38bdf8;font-size:12px;font-weight:700;'>🕒 {eta2}</span></div>
-                        <div><span style="color:#94a3b8;">TP3:</span> <strong style="color:#ffffff;">{fmt_px(t_tp3)}</strong><br/><span style='color:#38bdf8;font-size:12px;font-weight:700;'>🕒 {eta3}</span></div>
+                        <div><span style="color:#ffffff;">TP1:</span> <strong style="color:#ffffff;">{fmt_px(t_tp1)}</strong><br/><span style='color:#38bdf8;font-size:12px;font-weight:700;'>🕒 {eta1}</span></div>
+                        <div><span style="color:#ffffff;">TP2:</span> <strong style="color:#ffffff;">{fmt_px(t_tp2)}</strong><br/><span style='color:#38bdf8;font-size:12px;font-weight:700;'>🕒 {eta2}</span></div>
+                        <div><span style="color:#ffffff;">TP3:</span> <strong style="color:#ffffff;">{fmt_px(t_tp3)}</strong><br/><span style='color:#38bdf8;font-size:12px;font-weight:700;'>🕒 {eta3}</span></div>
                     </div>
                     """, unsafe_allow_html=True)
 
