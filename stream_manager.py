@@ -21,8 +21,8 @@ OKX_MAP = {
     "DOGEUSDT": "DOGE-USDT-SWAP",
 }
 REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
-PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v7"
-AUDIT_DB_KEY = "godzilla_audit_archive_v7"
+PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v8"
+AUDIT_DB_KEY = "godzilla_audit_archive_v8"
 MAX_ACTIVE_TRADES = 10
 
 
@@ -131,10 +131,12 @@ class BinanceFuturesStreamManager:
             trade_payload.setdefault("tp2_hit", False)
             trade_payload.setdefault("tp3_hit", False)
             trade_payload.setdefault("sl_hit", False)
+            trade_payload.setdefault("status_note", "ACTIVE COMMITTED")
+            
             self.active_trades.append(trade_payload)
             self.audit_archive.insert(0, dict(trade_payload))
             self._save_portfolio_to_turso()
-            return True, f"Committed [{trade_payload.get('timeframe')}] {trade_payload['symbol']} {trade_payload['direction']} to Godzilla Cloud Tracker."
+            return True, f"Committed [{trade_payload.get('timeframe')}] {trade_payload['symbol']} {trade_payload['direction']} to Godzilla Cloud & Audit Logbook."
 
     def kill_trade(self, trade_id: str) -> None:
         with self._lock:
@@ -159,15 +161,13 @@ class BinanceFuturesStreamManager:
             if not t.get("sl_hit"):
                 if (direction == "LONG" and mid_price <= sl) or (direction == "SHORT" and mid_price >= sl):
                     t["sl_hit"] = True
+                    t["status_note"] = "STOP-LOSS HIT"
                     changed = True
-                    # Immediately log to audit archive if not already recorded
                     audit_entry = dict(t)
-                    audit_entry["status_note"] = "STOP-LOSS HIT"
                     if not any(a.get("trade_id") == t.get("trade_id") and a.get("status_note") == "STOP-LOSS HIT" for a in self.audit_archive):
                         self.audit_archive.insert(0, audit_entry)
                     continue
 
-            # If SL is hit, freeze TPs and live tracking
             if t.get("sl_hit"):
                 continue
 
@@ -175,22 +175,28 @@ class BinanceFuturesStreamManager:
             if direction == "LONG":
                 if not t.get("tp1_hit") and mid_price >= tp1:
                     t["tp1_hit"] = True
+                    t["status_note"] = "TP1 HIT"
                     changed = True
                 if not t.get("tp2_hit") and mid_price >= tp2:
                     t["tp2_hit"] = True
+                    t["status_note"] = "TP2 HIT"
                     changed = True
                 if not t.get("tp3_hit") and mid_price >= tp3:
                     t["tp3_hit"] = True
+                    t["status_note"] = "ALL TPs HIT"
                     changed = True
             else:
                 if not t.get("tp1_hit") and mid_price <= tp1:
                     t["tp1_hit"] = True
+                    t["status_note"] = "TP1 HIT"
                     changed = True
                 if not t.get("tp2_hit") and mid_price <= tp2:
                     t["tp2_hit"] = True
+                    t["status_note"] = "TP2 HIT"
                     changed = True
                 if not t.get("tp3_hit") and mid_price <= tp3:
                     t["tp3_hit"] = True
+                    t["status_note"] = "ALL TPs HIT"
                     changed = True
 
         if changed:
@@ -268,11 +274,11 @@ class BinanceFuturesStreamManager:
                     for sym in WATCHLIST_SYMBOLS:
                         inst_id = OKX_MAP[sym]
 
-                        for bar_tf in ("4H", "1H"):
+                        for bar_tf, rest_tf in (("4H", "4H"), ("1H", "1H"), ("1D", "1D")):
                             try:
                                 async with session.get(
                                     self.OKX_REST_CANDLES,
-                                    params={"instId": inst_id, "bar": bar_tf, "limit": "100"},
+                                    params={"instId": inst_id, "bar": rest_tf, "limit": "100"},
                                     timeout=5,
                                 ) as resp:
                                     if resp.status == 200:
