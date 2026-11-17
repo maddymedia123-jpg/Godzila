@@ -15,7 +15,7 @@ st.markdown("""
     .block-container { padding-top: 1.4rem; padding-bottom: 2rem; }
     .stMetric {
         background-color: #f8f9fb;
-        padding: 12px 14px;
+        padding: 10px 12px;
         border-radius: 8px;
         border: 1px solid #e1e4e8;
     }
@@ -28,36 +28,14 @@ st.markdown("""
         padding: 10px 14px;
         border-radius: 8px 8px 0 0;
         border: 1px solid #223240;
+        margin-bottom: 4px;
     }
-    .gz-row-card {
+    .gz-row-container {
         background: linear-gradient(90deg, #0f1922 0%, #14222e 50%, #0f1922 100%);
-        color: #e6edf3;
-        padding: 12px 14px;
-        border-left: 1px solid #223240;
-        border-right: 1px solid #223240;
-        border-bottom: 1px solid #1e2d3a;
-    }
-    .gz-pill-green {
-        display: inline-block;
-        background: rgba(16, 185, 129, 0.18);
-        border: 1px solid #10b981;
-        color: #34d399;
-        font-size: 11px;
-        font-weight: 700;
-        padding: 2px 8px;
-        border-radius: 4px;
-        margin-bottom: 4px;
-    }
-    .gz-pill-red {
-        display: inline-block;
-        background: rgba(239, 68, 68, 0.18);
-        border: 1px solid #ef4444;
-        color: #f87171;
-        font-size: 11px;
-        font-weight: 700;
-        padding: 2px 8px;
-        border-radius: 4px;
-        margin-bottom: 4px;
+        border: 1px solid #223240;
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin-bottom: 8px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -91,65 +69,6 @@ def fmt_px(val: float) -> str:
     if val < 100.0:
         return f"${val:,.3f}"
     return f"${val:,.2f}"
-
-
-def build_proximity_bar_html(
-    label: str,
-    entry: float,
-    curr: float,
-    sl: float,
-    tp: float,
-    direction: str,
-    tp_hit: bool,
-    sl_hit: bool,
-) -> str:
-    if direction == "LONG":
-        sl_dist = max(entry - sl, 1e-8)
-        tp_dist = max(tp - entry, 1e-8)
-        move = curr - entry
-    else:
-        sl_dist = max(sl - entry, 1e-8)
-        tp_dist = max(entry - tp, 1e-8)
-        move = entry - curr
-
-    if tp_hit or move >= tp_dist:
-        pct_right = 100.0
-        pct_left = 0.0
-        badge = f"<span style='background:#10b981;color:#042f2e;font-weight:800;font-size:10px;padding:1px 6px;border-radius:4px;'>{label} HIT</span>"
-        callout = "<span style='color:#34d399;font-size:10px;font-weight:700;'>TARGET REACHED</span>"
-    elif sl_hit or move <= -sl_dist:
-        pct_right = 0.0
-        pct_left = 100.0
-        badge = "<span style='background:#ef4444;color:#fff;font-weight:800;font-size:10px;padding:1px 6px;border-radius:4px;'>SL HIT</span>"
-        callout = "<span style='color:#f87171;font-size:10px;font-weight:700;'>STOPPED OUT</span>"
-    elif move >= 0:
-        pct_right = min(100.0, (move / tp_dist) * 100.0)
-        pct_left = 0.0
-        rem_pct = abs((tp - curr) / max(curr, 1e-8)) * 100.0
-        badge = ""
-        callout = f"<span style='color:#34d399;font-size:10px;font-weight:600;'>+{rem_pct:.2f}% to {label}</span>"
-    else:
-        pct_left = min(100.0, (abs(move) / sl_dist) * 100.0)
-        pct_right = 0.0
-        rem_sl_pct = abs((curr - sl) / max(curr, 1e-8)) * 100.0
-        badge = ""
-        callout = f"<span style='color:#f87171;font-size:10px;font-weight:600;'>{rem_sl_pct:.2f}% to SL</span>"
-
-    return f"""
-    <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
-        <span style="width:28px;color:#8b9eb0;font-size:11px;font-weight:700;">{label}</span>
-        <div style="flex:1;display:flex;align-items:center;position:relative;height:12px;">
-            <div style="width:50%;height:4px;background:#1e293b;border-radius:2px 0 0 2px;display:flex;justify-content:flex-end;overflow:hidden;">
-                <div style="width:{pct_left:.1f}%;height:100%;background:linear-gradient(90deg,#ef4444,#f87171);"></div>
-            </div>
-            <div style="width:2px;height:10px;background:#64748b;z-index:2;"></div>
-            <div style="width:50%;height:4px;background:#1e293b;border-radius:0 2px 2px 0;display:flex;justify-content:flex-start;overflow:hidden;">
-                <div style="width:{pct_right:.1f}%;height:100%;background:linear-gradient(90deg,#059669,#34d399);box-shadow:0 0 6px #10b981;"></div>
-            </div>
-        </div>
-        <div style="width:130px;text-align:right;white-space:nowrap;">{badge} {callout}</div>
-    </div>
-    """
 
 
 def render_signal_card(sig, mid_price: float, tf_tag: str):
@@ -210,9 +129,10 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
         st.caption(f"No active {tab_prefix} trades locked in Godzilla Cloud yet.")
         return
 
+    # Header Row
     st.markdown("""
     <div class="gz-tracker-header">
-        <div style="display:grid;grid-template-columns:1.2fr 1.0fr 1.1fr 3.4fr 1.1fr 1.2fr 0.4fr;align-items:center;">
+        <div style="display:grid;grid-template-columns:1.2fr 1.0fr 1.1fr 3.0fr 1.1fr 1.2fr 0.4fr;align-items:center;">
             <div>ASSET / PAIR</div>
             <div>CURRENT PRICE</div>
             <div>SHARED SL</div>
@@ -244,65 +164,74 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
         dir_color = "#34d399" if t_dir == "LONG" else "#f87171"
         tf_badge_bg = "#1d4ed8" if t_tf == "1H" else "#7c3aed"
 
-        bar1 = build_proximity_bar_html("TP1", t_entry, live_px, t_sl, t_tp1, t_dir, tr.get("tp1_hit", False), tr.get("sl_hit", False))
-        bar2 = build_proximity_bar_html("TP2", t_entry, live_px, t_sl, t_tp2, t_dir, tr.get("tp2_hit", False), tr.get("sl_hit", False))
-        bar3 = build_proximity_bar_html("TP3", t_entry, live_px, t_sl, t_tp3, t_dir, tr.get("tp3_hit", False), tr.get("sl_hit", False))
+        # Calculate progress values for TP1, TP2, TP3
+        def get_progress_val(tp_val: float) -> float:
+            if t_dir == "LONG":
+                dist = max(tp_val - t_entry, 1e-8)
+                progress = live_px - t_entry
+            else:
+                dist = max(t_entry - tp_val, 1e-8)
+                progress = t_entry - live_px
+            return float(min(1.0, max(0.0, progress / dist)))
 
-        def status_pill(lbl: str, tp_val: float, hit: bool) -> str:
-            if tr.get("sl_hit"):
-                return "<div class='gz-pill-red'>SL HIT</div>"
-            if hit:
-                return f"<div class='gz-pill-green'>{lbl} HIT</div>"
-            tot = abs(tp_val - t_entry)
-            prog = (live_px - t_entry) if t_dir == "LONG" else (t_entry - live_px)
-            if prog >= 0:
-                pct = min(99, int((prog / max(tot, 1e-8)) * 100))
-                return f"<div class='gz-pill-green'>{pct}% to {lbl}</div>"
-            sl_tot = abs(t_entry - t_sl)
-            sl_p = min(99, int((abs(prog) / max(sl_tot, 1e-8)) * 100))
-            return f"<div class='gz-pill-red'>{sl_p}% to SL</div>"
+        p1_prog = get_progress_val(t_tp1)
+        p2_prog = get_progress_val(t_tp2)
+        p3_prog = get_progress_val(t_tp3)
 
-        p1_pill = status_pill("TP1", t_tp1, tr.get("tp1_hit", False))
-        p2_pill = status_pill("TP2", t_tp2, tr.get("tp2_hit", False))
-        p3_pill = status_pill("TP3", t_tp3, tr.get("tp3_hit", False))
+        with st.container():
+            st.markdown('<div class="gz-row-container">', unsafe_allow_html=True)
+            cols = st.columns([1.2, 1.0, 1.1, 3.0, 1.1, 1.2, 0.4])
 
-        row_cols = st.columns([9.1, 0.5])
-        with row_cols[0]:
-            st.markdown(f"""
-            <div class="gz-row-card">
-                <div style="display:grid;grid-template-columns:1.2fr 1.0fr 1.1fr 3.4fr 1.1fr 1.2fr;align-items:center;gap:6px;">
-                    <div>
-                        <span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:4px;font-size:11px;">{icon_char}</span>
-                        <strong style="font-size:13px;">{t_sym.replace('USDT','')}/USDT</strong>
-                        <span style="background:{tf_badge_bg};color:#fff;font-size:9px;font-weight:800;padding:1px 4px;border-radius:3px;margin-left:3px;">{t_tf}</span><br/>
-                        <span style="color:{dir_color};font-size:11px;font-weight:700;margin-left:24px;">{t_dir} · {fmt_px(t_entry)}</span>
-                    </div>
-                    <div style="font-size:14px;font-weight:700;color:#ffffff;">
-                        {fmt_px(live_px)}
-                    </div>
-                    <div style="font-size:12px;font-weight:600;color:#e2e8f0;">
-                        {fmt_px(t_sl)} <span style="color:#f87171;font-size:10px;">({sl_pct:+.2f}%)</span>
-                    </div>
-                    <div>
-                        {bar1}{bar2}{bar3}
-                    </div>
-                    <div style="font-size:11px;line-height:1.65;color:#cbd5e1;font-weight:600;">
-                        <div>{fmt_px(t_tp1)}</div>
-                        <div>{fmt_px(t_tp2)}</div>
-                        <div>{fmt_px(t_tp3)}</div>
-                    </div>
-                    <div>
-                        {p1_pill}{p2_pill}{p3_pill}
-                    </div>
+            with cols[0]:
+                st.markdown(f"""
+                <span style="display:inline-block;width:18px;height:18px;line-height:18px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:4px;font-size:10px;">{icon_char}</span>
+                <strong style="font-size:13px;color:#fff;">{t_sym.replace('USDT','')}/USDT</strong>
+                <span style="background:{tf_badge_bg};color:#fff;font-size:9px;font-weight:800;padding:1px 4px;border-radius:3px;margin-left:3px;">{t_tf}</span><br/>
+                <span style="color:{dir_color};font-size:11px;font-weight:700;margin-left:22px;">{t_dir} · {fmt_px(t_entry)}</span>
+                """, unsafe_allow_html=True)
+
+            with cols[1]:
+                st.markdown(f"<div style='font-size:14px;font-weight:700;color:#ffffff;padding-top:4px;'>{fmt_px(live_px)}</div>", unsafe_allow_html=True)
+
+            with cols[2]:
+                st.markdown(f"<div style='font-size:12px;font-weight:600;color:#e2e8f0;padding-top:4px;'>{fmt_px(t_sl)}<br/><span style='color:#f87171;font-size:10px;'>({sl_pct:+.2f}%)</span></div>", unsafe_allow_html=True)
+
+            with cols[3]:
+                st.markdown("<div style='font-size:10px;color:#8b9eb0;margin-bottom:-4px;'>TP1 / TP2 / TP3 Proximity</div>", unsafe_allow_html=True)
+                st.progress(p1_prog)
+                st.progress(p2_prog)
+                st.progress(p3_prog)
+
+            with cols[4]:
+                st.markdown(f"""
+                <div style="font-size:11px;line-height:1.6;color:#cbd5e1;font-weight:600;padding-top:2px;">
+                    <div>{fmt_px(t_tp1)}</div>
+                    <div>{fmt_px(t_tp2)}</div>
+                    <div>{fmt_px(t_tp3)}</div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
 
-        with row_cols[1]:
-            st.write("")
-            if st.button("✕", key=f"kill_{tab_prefix}_{t_id}", help=f"Kill {t_sym} [{t_tf}] trade"):
-                manager.kill_trade(t_id)
-                st.rerun()
+            with cols[5]:
+                def status_badge(lbl: str, tp_val: float, hit: bool, prog: float) -> str:
+                    if tr.get("sl_hit"):
+                        return "<span style='color:#f87171;font-weight:700;font-size:11px;'>SL HIT</span>"
+                    if hit or prog >= 1.0:
+                        return f"<span style='color:#34d399;font-weight:700;font-size:11px;'>{lbl} HIT</span>"
+                    pct = int(prog * 100)
+                    return f"<span style='color:#34d399;font-weight:600;font-size:11px;'>{pct}% to {lbl}</span>"
+
+                b1 = status_badge("TP1", t_tp1, tr.get("tp1_hit", False), p1_prog)
+                b2 = status_badge("TP2", t_tp2, tr.get("tp2_hit", False), p2_prog)
+                b3 = status_badge("TP3", t_tp3, tr.get("tp3_hit", False), p3_prog)
+                st.markdown(f"<div style='line-height:1.7;padding-top:2px;'>{b1}<br/>{b2}<br/>{b3}</div>", unsafe_allow_html=True)
+
+            with cols[6]:
+                st.write("")
+                if st.button("✕", key=f"kill_{tab_prefix}_{t_id}", help=f"Kill {t_sym} [{t_tf}] trade"):
+                    manager.kill_trade(t_id)
+                    st.rerun()
+
+            st.markdown('</div>', unsafe_allow_html=True)
 
 
 # Header Bar
