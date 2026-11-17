@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import threading
@@ -23,10 +24,6 @@ REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
 
 
 class BinanceFuturesStreamManager:
-    BINANCE_WS_COMBINED = "wss://fstream.binance.com/stream"
-    BINANCE_REST_KLINES = "https://fapi.binance.com/fapi/v1/klines"
-    BYBIT_WS_LINEAR = "wss://stream.bybit.com/v5/public/linear"
-    BYBIT_REST_KLINES = "https://api.bybit.com/v5/market/kline"
     OKX_WS_PUBLIC = "wss://ws.okx.com:8443/ws/v5/public"
     OKX_REST_BOOKS = "https://www.okx.com/api/v5/market/books"
     OKX_REST_CANDLES = "https://www.okx.com/api/v5/market/candles"
@@ -39,9 +36,6 @@ class BinanceFuturesStreamManager:
         self._connection_status: str = "INITIALIZING"
         self._venue: str = "OKX"
         self._msg_count: int = 0
-
-        self._bids_books: Dict[str, Dict[float, float]] = {sym: {} for sym in WATCHLIST_SYMBOLS}
-        self._asks_books: Dict[str, Dict[float, float]] = {sym: {} for sym in WATCHLIST_SYMBOLS}
 
         self.scanner_active: bool = True
         self.account_balance: float = 25000.0
@@ -58,8 +52,13 @@ class BinanceFuturesStreamManager:
 
     def _init_turso_db(self):
         try:
-            turso_url = st.secrets.get("turso", {}).get("database_url", "libsql://godzila-db-maddymedia123.turso.io")
-            turso_token = st.secrets.get("turso", {}).get("auth_token", "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTMxMTc0NjYsImlkIjoiMDFhMTdlMWYtMWQwMS03MmNhLTg4MjItNzk1MjY2NDExMTgwIiwia2lkIjoia3l0RU9uVVlMSXBwS3ZQMGVzWEFDR3lYRHM3blFhbmhCQkJiOHdqNDRMayIsInJpZCI6IjRhM2ZhZDUyLTEwMGYtNGE4My1hNTIyLTZkYmViM2E1N2I2NyJ9.eXwFwdN73oP3yarkOIo_ZjEQyR2nTCjUZoEEa3LPYfV48c07sLD4d2ocTstAqAwBiltyAHsVe6osnzbs0pFJAQ")
+            raw_url = st.secrets.get("turso", {}).get("database_url", "libsql://godzila-db-maddymedia123.turso.io")
+            turso_url = raw_url.replace("libsql://", "https://").replace("wss://", "https://")
+            turso_token = st.secrets.get("turso", {}).get("auth_token", "")
+
+            if not turso_token:
+                logger.warning("No Turso auth_token found in st.secrets; running with local session memory.")
+                return
 
             self.db = create_client_sync(url=turso_url, auth_token=turso_token)
             self.db.execute("""
@@ -71,6 +70,7 @@ class BinanceFuturesStreamManager:
             """)
         except Exception as exc:
             logger.error(f"Turso DB initialization failed: {exc}")
+            self.db = None
 
     def save_state_to_turso(self, key: str, data: dict):
         if not self.db:
@@ -94,6 +94,7 @@ class BinanceFuturesStreamManager:
                 return json.loads(rows[0][0])
         except Exception as exc:
             logger.error(f"Failed to load from Turso: {exc}")
+            self.db = None  # Stop spamming 404s if DB URL/token is invalid
         return None
 
     def update_config(
@@ -165,7 +166,6 @@ class BinanceFuturesStreamManager:
                 while not self._stop_event.is_set():
                     for sym in WATCHLIST_SYMBOLS:
                         inst_id = OKX_MAP[sym]
-                        # 1. Immediate REST Orderbook Seed via OKX (unblocked globally)
                         try:
                             async with session.get(
                                 self.OKX_REST_BOOKS,
@@ -194,10 +194,9 @@ class BinanceFuturesStreamManager:
                                             )
                                             if metrics:
                                                 self._latest_states[sym] = metrics
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.error(f"OKX REST book seed error ({sym}): {e}")
 
-                        # 2. GARCH Volatility Calibration via OKX Candles
                         try:
                             async with session.get(
                                 self.OKX_REST_CANDLES,
