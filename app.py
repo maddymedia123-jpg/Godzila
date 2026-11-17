@@ -1,247 +1,117 @@
-import datetime
-import time
-from typing import List
-import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import streamlit as st
-from stream_manager import BinanceFuturesStreamManager, WATCHLIST_SYMBOLS
+import time
+from stream_manager import BinanceFuturesStreamManager
 
-PKT_TZ = datetime.timezone(datetime.timedelta(hours=5), name="PKT")
-UTC_TZ = datetime.timezone.utc
-
-
-def format_dual_time(ts: float) -> str:
-    dt_pkt = datetime.datetime.fromtimestamp(ts, tz=PKT_TZ).strftime("%H:%M:%S PKT")
-    dt_utc = datetime.datetime.fromtimestamp(ts, tz=UTC_TZ).strftime("%H:%M:%S UTC")
-    return f"{dt_pkt} ({dt_utc})"
-
-
+# 1. Page Configuration (Must be the very first Streamlit command)
 st.set_page_config(
-    page_title="Institutional Order Flow & Student State-Locked Signals",
+    page_title="Institutional Perpetuals Terminal",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded"
 )
 
-st.markdown(
-    """
-<style>
-.stApp { background-color: #F1F5F9; color: #0F172A; }
-.neutral-card {
-    background-color: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 10px; padding: 14px 16px;
-    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06); color: #0F172A;
-}
-.neutral-label { font-size: 0.74rem; font-weight: 600; text-transform: uppercase; color: #475569; margin-bottom: 4px; }
-.preset-card {
-    background-color: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 10px; padding: 18px;
-    box-shadow: 0 2px 5px rgba(15, 23, 42, 0.06); color: #0F172A;
-}
-.price-box {
-    background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 12px;
-    font-family: 'JetBrains Mono', monospace; font-size: 0.88rem; margin: 10px 0;
-}
-.price-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #E2E8F0; }
-.price-row:last-child { border-bottom: none; }
-.badge-long { background-color: #DCFCE7; color: #166534; border: 1px solid #86EFAC; padding: 3px 10px; border-radius: 5px; font-weight: 800; font-family: monospace; }
-.badge-short { background-color: #FEE2E2; color: #991B1B; border: 1px solid #FCA5A5; padding: 3px 10px; border-radius: 5px; font-weight: 800; font-family: monospace; }
-.coinglass-banner {
-    background: linear-gradient(135deg, #0F172A, #1E293B); color: #F8FAFC; border-radius: 10px; padding: 14px 18px;
-    font-family: monospace; font-size: 0.85rem; margin-bottom: 16px; border: 1px solid #334155;
-}
-.warning-strip {
-    background-color: #FEF3C7; border: 1px solid #FCD34D; color: #92400E; border-radius: 6px; padding: 8px 10px;
-    font-size: 0.78rem; font-family: monospace; margin-top: 8px;
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
+# Custom Styling for Institutional Dark Terminal Look
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; color: #c9d1d9; }
+    .stMetric { background-color: #161b22; padding: 15px; border-radius: 6px; border: 1px solid #30363d; }
+    </style>
+""", unsafe_allow_html=True)
 
-
+# 2. Initialize Stream Manager in Session State (with Turso DB persistence)
 @st.cache_resource
-def get_stream_manager() -> BinanceFuturesStreamManager:
+def get_stream_manager():
     return BinanceFuturesStreamManager(active_symbol="BTCUSDT")
-
 
 manager = get_stream_manager()
 
+# 3. Sidebar Configuration Controls
+st.sidebar.title("⚡ Quant Engine Controls")
+active_symbol = st.sidebar.selectbox("Asset Universe", ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"], index=0)
+student_balance = st.sidebar.number_input("Account Capital ($)", value=100.0, step=10.0)
+scanner_active = st.sidebar.toggle("Live Signal Scanner", value=True)
 
-def fmt_price(val: float) -> str:
-    if val >= 100: return f"${val:,.2f}"
-    elif val >= 1: return f"${val:,.4f}"
-    return f"${val:,.5f}"
+st.sidebar.markdown("---")
+st.sidebar.subheader("Model Hyperparameters")
+decay_lambda = st.sidebar.slider("Decay Lambda ($\lambda$)", 0.05, 1.0, 0.35, 0.05)
+imbalance_threshold = st.sidebar.slider("Imbalance Threshold", 0.1, 0.8, 0.40, 0.05)
+max_spread_phi = st.sidebar.number_input("Max Spread $\phi$", value=0.0005, format="%.5f")
+garch_k = st.sidebar.slider("GARCH Multiplier ($k$)", 1.0, 3.0, 1.5, 0.1)
 
-
-def parse_zones(zones_str: str) -> List[float]:
-    zones = []
-    for token in zones_str.replace("\n", ",").split(","):
-        token = token.strip()
-        if token:
-            try: zones.append(float(token))
-            except ValueError: pass
-    return sorted(zones)
-
-
-now_ts = time.time()
-top_left, top_mid, top_right = st.columns([2.2, 1.3, 1.3])
-with top_left:
-    st.markdown("### ⚡ Student State-Locked Signals & Coinglass Liquidation Terminal")
-    st.caption(f"🕒 Server Clock: **{format_dual_time(now_ts)}**")
-with top_mid:
-    scanner_active = st.toggle("🟢 LIVE AUTO-SCANNER: ON", value=True)
-with top_right:
-    auto_refresh = st.toggle("⚡ Real-Time Stream (500ms)", value=True)
-
-with st.sidebar:
-    st.markdown("### 🛠️ Pro Terminal Settings")
-    pro_symbol = st.selectbox("Pro Terminal Contract", options=WATCHLIST_SYMBOLS, index=0)
-    c_bal, c_risk = st.columns(2)
-    with c_bal: account_balance = st.number_input("Pro Equity ($)", min_value=100.0, value=25000.0, step=500.0)
-    with c_risk: risk_pct = st.number_input("Pro Risk (%)", min_value=0.1, max_value=10.0, value=1.0, step=0.1)
-    st.markdown("---")
-    decay_lambda = st.slider("Depth Decay (λ)", 0.05, 1.00, 0.35, 0.05)
-    imbalance_threshold = st.slider("Imbalance Trigger (|I_t|)", 0.15, 0.85, 0.40, 0.05)
-    max_spread_bps = st.slider("Max Spread Friction (bps)", 0.5, 25.0, 5.0, 0.5)
-    garch_k = st.slider("GARCH Stop Multiplier (k)", 0.5, 4.0, 1.5, 0.1)
-    zones_input = st.text_area("Manual Pro S/R Levels", value="", height=70)
-    structural_zones = parse_zones(zones_input)
-
-if "student_coin" not in st.session_state: st.session_state.student_coin = "SOLUSDT"
-if "student_balance" not in st.session_state: st.session_state.student_balance = 100.0
-
+# Push configuration updates back to the manager engine
 manager.update_config(
-    active_symbol=pro_symbol, scanner_active=scanner_active, account_balance=account_balance,
-    student_balance=st.session_state.student_balance, risk_pct=risk_pct, decay_lambda=decay_lambda,
-    imbalance_threshold=imbalance_threshold, max_spread_phi=max_spread_bps / 10000.0,
-    garch_k=garch_k, structural_zones=structural_zones,
+    active_symbol=active_symbol,
+    scanner_active=scanner_active,
+    account_balance=25000.0,
+    student_balance=student_balance,
+    risk_pct=1.0,
+    decay_lambda=decay_lambda,
+    imbalance_threshold=imbalance_threshold,
+    max_spread_phi=max_spread_phi,
+    garch_k=garch_k,
+    structural_zones=[]
 )
 
-tab_student, tab_pro = st.tabs(["🎯 Student State-Locked Signals (15m · 1H · 4H)", "🔬 Pro Institutional Order Book Terminal"])
+# 4. Main Terminal Layout
+st.title(f"Institutional Derivatives & Microstructure Terminal — {active_symbol}")
 
+# Fetch live snapshot data from background stream & engine
+snapshot = manager.get_snapshot(active_symbol)
+metrics = snapshot.get("metrics", {})
+liq_stats = snapshot.get("liq_stats", {})
 
-# =============================================================================
-# TAB 1: STUDENT STATE-LOCKED SIGNALS & COINGLASS BANNER
-# =============================================================================
-with tab_student:
-    s_ctrl1, s_ctrl2 = st.columns([2.2, 1.0])
-    with s_ctrl1:
-        selected_coin = st.segmented_control("Select Asset", options=WATCHLIST_SYMBOLS, default=st.session_state.student_coin)
-        if selected_coin: st.session_state.student_coin = selected_coin
-    with s_ctrl2:
-        st.session_state.student_balance = st.number_input("My Account Balance ($)", 50.0, 10_000_000.0, float(st.session_state.student_balance), 50.0)
+# Top Metrics Row
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("Mid Price", f"${metrics.get('mid_price', 0.0):,.2f}")
+with col2:
+    st.metric("Orderbook Imbalance", f"{metrics.get('imbalance_t', 0.0):+.3f}")
+with col3:
+    st.metric("GARCH Volatility ($\sigma$)", f"{metrics.get('garch_sigma', 0.0045)*100:.3f}%")
+with col4:
+    st.metric("WS Message Count", f"{snapshot.get('msg_count', 0):,}")
 
-    @st.fragment(run_every=0.5 if auto_refresh else None)
-    def render_student_dashboard():
-        snap = manager.get_snapshot(st.session_state.student_coin)
-        metrics = snap.get("metrics", {})
-        coin = snap["symbol"]
-        liq = snap.get("liq_stats", {})
+st.markdown("---")
 
-        # Coinglass Liquidation & Max Pain Banner
-        long_c = fmt_price(liq.get("long_cluster", 0))
-        short_c = fmt_price(liq.get("short_cluster", 0))
-        long_u = liq.get("long_usd", 0)
-        short_u = liq.get("short_usd", 0)
-        oi_b = liq.get("oi_bias", "Neutral")
+# 5. Live Signals & Persistence Integration (Turso DB)
+st.subheader("📡 Live Candidate & Pinned Trade Signals")
+candidate_signals = snapshot.get("candidate_signals", [])
 
-        banner_html = (
-            f"<div class='coinglass-banner'>"
-            f"<b>📊 COINGLASS LIQUIDATION & DERIVATIVES PULSE ({coin}):</b><br>"
-            f"📉 Major Long Liquidation Cluster: <b style='color:#F87171;'>{long_c}</b> (${long_u:,.1f}M at risk) &nbsp;|&nbsp; "
-            f"📈 Major Short Liquidation Cluster: <b style='color:#34D399;'>{short_c}</b> (${short_u:,.1f}M at risk)<br>"
-            f"⚡ Open Interest Bias: <b>{oi_b}</b>"
-            f"</div>"
-        )
-        st.markdown(banner_html, unsafe_allow_html=True)
+if candidate_signals:
+    for idx, sig in enumerate(candidate_signals):
+        with st.container():
+            c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
+            c1.markdown(f"**Symbol:** {sig.symbol} | **{sig.direction}**")
+            c2.markdown(f"**Entry:** ${sig.entry_price:,.2f}")
+            c3.markdown(f"**Stop Loss:** ${sig.stop_loss:,.2f}")
+            c4.markdown(f"**Target 2:** ${sig.tp2:,.2f}")
+            
+            # Turso persistence button action
+            if st.button(f"Commit & Pin Signal #{idx+1}", key=f"commit_{sig.symbol}_{idx}"):
+                signal_data = {
+                    "symbol": sig.symbol,
+                    "direction": sig.direction,
+                    "entry": sig.entry_price,
+                    "sl": sig.stop_loss,
+                    "tp1": sig.tp1,
+                    "tp2": sig.tp2,
+                    "tp3": sig.tp3,
+                    "timestamp": time.time()
+                }
+                manager.save_state_to_turso(f"pinned_trade_{sig.symbol}", signal_data)
+                st.success(f"Successfully committed and synced {sig.symbol} trade to Turso global memory!")
+else:
+    st.info("Scanning orderbook microstructure for high-probability institutional imbalances...")
 
-        if not metrics:
-            st.info(f"Calibrating state-locked models for {coin}...")
-            return
+# Display persistent saved trades from Turso database
+st.markdown("---")
+st.subheader("💾 Persistent Cloud State (Turso DB)")
+saved_trade = manager.load_state_from_turso(f"pinned_trade_{active_symbol}")
+if saved_trade:
+    st.json(saved_trade)
+else:
+    st.caption("No pinned active trades stored in Turso for this asset yet.")
 
-        locked_sigs = snap.get("locked_signals", {})
-        tf_slots = [("15m", "15m Scalp (20x · 0.5% Risk)"), ("1H", "1H Intraday (50x · 1.0% Risk)"), ("4H", "4H Swing (100x · 2.0% Risk)")]
-        p_cols = st.columns(3)
-
-        for col, (tf_key, tf_title) in zip(p_cols, tf_slots):
-            sig = locked_sigs.get(tf_key)
-            with col:
-                if sig is None:
-                    card_html = (
-                        f"<div class='preset-card' style='border-top: 4px solid #64748B;'>"
-                        f"<div style='font-weight:800; font-size:1.05rem; color:#334155;'>{tf_title}</div>"
-                        f"<div style='font-size:0.8rem; color:#64748B; margin-top:6px;'>Scanning Order Book Confluence...</div>"
-                        f"<div style='background:#F8FAFC; border:1px dashed #CBD5E1; border-radius:8px; padding:20px; text-align:center; color:#64748B; font-family:monospace; margin-top:15px;'>"
-                        f"⏳ <b>STATE: WAITING FOR SETUP</b><br><span style='font-size:0.72rem;'>Slot locked until institutional gates align.</span>"
-                        f"</div></div>"
-                    )
-                    st.markdown(card_html, unsafe_allow_html=True)
-                    continue
-
-                badge_cls = "badge-long" if sig.direction == "LONG" else "badge-short"
-                accent = "#15803D" if sig.direction == "LONG" else "#B91C1C"
-
-                card_html = (
-                    f"<div class='preset-card' style='border-top: 4px solid {accent};'>"
-                    f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
-                    f"<span style='font-weight:800; font-size:1.05rem; color:{accent};'>{tf_title}</span>"
-                    f"<span class='{badge_cls}'>{sig.direction}</span>"
-                    f"</div>"
-                    f"<div style='font-size:0.75rem; color:#475569; font-family:monospace; margin-top:3px;'>Target ETA: {sig.eta_pkt_utc}</div>"
-                    f"<div class='price-box'>"
-                    f"<div class='price-row'><span>ENTRY PRICE:</span><b>{fmt_price(sig.entry_price)}</b></div>"
-                    f"<div class='price-row'><span>STOP LOSS:</span><b style='color:#B91C1C;'>{fmt_price(sig.stop_loss)}</b></div>"
-                    f"<div class='price-row'><span>TP 1:</span><b style='color:#15803D;'>{fmt_price(sig.tp1)}</b></div>"
-                    f"<div class='price-row'><span>TP 2:</span><b style='color:#15803D;'>{fmt_price(sig.tp2)}</b></div>"
-                    f"<div class='price-row'><span>TP 3:</span><b style='color:#15803D;'>{fmt_price(sig.tp3)}</b></div>"
-                    f"</div>"
-                    f"<div style='display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-family:monospace; font-size:0.8rem;'>"
-                    f"<div style='background:#F8FAFC; border:1px solid #E2E8F0; padding:8px; border-radius:6px;'>"
-                    f"<span style='color:#475569; font-size:0.7rem;'>MARGIN ({sig.leverage}x)</span><br><b>${sig.margin_required_usd:,.2f}</b>"
-                    f"</div>"
-                    f"<div style='background:#F8FAFC; border:1px solid #E2E8F0; padding:8px; border-radius:6px;'>"
-                    f"<span style='color:#475569; font-size:0.7rem;'>NOTIONAL SIZE</span><br><b>${sig.position_notional_usd:,.0f}</b>"
-                    f"</div></div>"
-                    f"<div class='warning-strip'><b>STATUS: {sig.status_note}</b><br>Win Prob: ~{sig.win_probability}%</div>"
-                    f"</div>"
-                )
-                st.markdown(card_html, unsafe_allow_html=True)
-
-        st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-        st.markdown("#### 📚 Diagnostic Trade Outcome Logbook & Mistake Audit")
-        
-        audit_feed = snap.get("audit_logbook", [])
-        if audit_feed:
-            audit_rows = []
-            for item in audit_feed:
-                audit_rows.append({
-                    "Time (PKT)": format_dual_time(item["timestamp"]),
-                    "Asset": item["symbol"],
-                    "Timeframe": item["timeframe"],
-                    "Side": item["direction"],
-                    "Entry": fmt_price(item["entry"]),
-                    "Outcome": item["exit_status"],
-                    "Classification": item["classification"],
-                })
-            st.dataframe(pd.DataFrame(audit_rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("Closed trades will automatically populate here for student performance review.")
-
-    render_student_dashboard()
-
-
-# =============================================================================
-# TAB 2: PRO INSTITUTIONAL TERMINAL
-# =============================================================================
-with tab_pro:
-    @st.fragment(run_every=0.5 if auto_refresh else None)
-    def render_pro_terminal():
-        snap = manager.get_snapshot(pro_symbol)
-        metrics = snap.get("metrics", {})
-        if not metrics:
-            st.info("Connecting to pro feeds...")
-            return
-        st.markdown(f"#### {pro_symbol} Institutional Microstructure Engine")
-        st.metric("Mid-Price", fmt_price(metrics["mid_price"]), f"Imbalance: {metrics['imbalance_t']:+.3f}")
-
-    render_pro_terminal()
+# Auto-refresh mechanism to keep websocket metrics streaming live on screen
+time.sleep(1)
+st.rerun()
