@@ -21,8 +21,8 @@ OKX_MAP = {
     "DOGEUSDT": "DOGE-USDT-SWAP",
 }
 REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
-PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v4"
-AUDIT_DB_KEY = "godzilla_audit_archive_v4"
+PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v5"
+AUDIT_DB_KEY = "godzilla_audit_archive_v5"
 MAX_ACTIVE_TRADES = 10
 
 
@@ -148,6 +148,9 @@ class BinanceFuturesStreamManager:
         for t in self.active_trades:
             if t.get("symbol") != symbol:
                 continue
+            if t.get("sl_hit"):
+                continue
+
             direction = t.get("direction", "LONG")
             sl = float(t.get("stop_loss", 0.0))
             tp1 = float(t.get("tp1", 0.0))
@@ -155,6 +158,10 @@ class BinanceFuturesStreamManager:
             tp3 = float(t.get("tp3", 0.0))
 
             if direction == "LONG":
+                if not t.get("sl_hit") and mid_price <= sl:
+                    t["sl_hit"] = True
+                    changed = True
+                    continue
                 if not t.get("tp1_hit") and mid_price >= tp1:
                     t["tp1_hit"] = True
                     changed = True
@@ -164,10 +171,11 @@ class BinanceFuturesStreamManager:
                 if not t.get("tp3_hit") and mid_price >= tp3:
                     t["tp3_hit"] = True
                     changed = True
-                if not t.get("sl_hit") and mid_price <= sl:
+            else:
+                if not t.get("sl_hit") and mid_price >= sl:
                     t["sl_hit"] = True
                     changed = True
-            else:
+                    continue
                 if not t.get("tp1_hit") and mid_price <= tp1:
                     t["tp1_hit"] = True
                     changed = True
@@ -176,9 +184,6 @@ class BinanceFuturesStreamManager:
                     changed = True
                 if not t.get("tp3_hit") and mid_price <= tp3:
                     t["tp3_hit"] = True
-                    changed = True
-                if not t.get("sl_hit") and mid_price >= sl:
-                    t["sl_hit"] = True
                     changed = True
 
         if changed:
