@@ -104,11 +104,12 @@ def fmt_px(val: float) -> str:
 def render_signal_card(sig, mid_price: float, tf_tag: str):
     is_long = sig.direction == "LONG"
     dir_color = "#34d399" if is_long else "#f87171"
+    align_color = "#34d399" if "ALIGNED" in sig.alignment_status else "#f87171"
 
     with st.container(border=True):
         r1, r2, r3 = st.columns([2.2, 2.4, 1.6])
         r1.markdown(f"### {sig.symbol} · <span style='color:{dir_color};'>{sig.direction}</span> `[{sig.timeframe}]`", unsafe_allow_html=True)
-        r2.markdown(f"**Strategy:** {sig.risk_tier}\n\n{sig.htf_summary}")
+        r2.markdown(f"**Strategy:** {sig.risk_tier}\n\n{sig.htf_summary}\n\n**Timeframe Check:** <span style='color:{align_color};font-weight:900;'>{sig.alignment_status}</span>", unsafe_allow_html=True)
         r3.markdown(f"**Win Prob:** {sig.win_probability}% | **Lev:** {sig.leverage}x\n\n**Margin:** ${sig.margin_required_usd:,.2f}")
 
         if sig.can_enter:
@@ -126,7 +127,7 @@ def render_signal_card(sig, mid_price: float, tf_tag: str):
         st.caption(f"⚠️ {sig.risk_warning}")
 
         if sig.can_enter:
-            if st.button(f"🔒 Commit {tf_tag} Trade to Godzilla Cloud ({sig.symbol} {sig.direction})", key=f"commit_{tf_tag}_{sig.signal_id}"):
+            if st.button(f"🔒 Commit {tf_tag} Trade to Godzilla Cloud & Audit Log ({sig.symbol} {sig.direction})", key=f"commit_{tf_tag}_{sig.signal_id}"):
                 trade_record = {
                     "trade_id": sig.signal_id,
                     "symbol": sig.symbol,
@@ -165,9 +166,9 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
     st.markdown('<div class="gz-dark-wrapper">', unsafe_allow_html=True)
     st.markdown("""
     <div class="gz-tracker-header">
-        <div style="display:grid;grid-template-columns:1.3fr 1.1fr 1.2fr 3.2fr 1.4fr 1.3fr 0.4fr;align-items:center;">
+        <div style="display:grid;grid-template-columns:1.3fr 1.3fr 1.2fr 3.2fr 1.4fr 1.3fr 0.4fr;align-items:center;">
             <div>ASSET / PAIR</div>
-            <div>CURRENT PRICE</div>
+            <div>LIVE vs ENTRY PRICE</div>
             <div>SHARED SL</div>
             <div>PROXIMITY BAR (SL-LEFT, TP-RIGHT)</div>
             <div>TP TARGET & TIMELINE</div>
@@ -202,6 +203,9 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
         tp3_hit = tr.get("tp3_hit", False)
 
         sl_pct = ((t_sl - t_entry) / max(t_entry, 1e-8)) * 100.0
+        price_diff_pct = ((live_px - t_entry) / max(t_entry, 1e-8)) * 100.0
+        diff_color = "#34d399" if price_diff_pct >= 0 else "#f87171"
+
         icon_char, icon_color = COIN_BADGES.get(t_sym, ("◈", "#38bdf8"))
         dir_color = "#34d399" if is_long else "#f87171"
         fill_class = "gz-progress-fill-green" if is_long else "gz-progress-fill-red"
@@ -226,18 +230,22 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
         with st.container():
             st.markdown('<div class="gz-row-container">', unsafe_allow_html=True)
-            cols = st.columns([1.3, 1.1, 1.2, 3.2, 1.4, 1.3, 0.4])
+            cols = st.columns([1.3, 1.3, 1.2, 3.2, 1.4, 1.3, 0.4])
 
             with cols[0]:
                 st.markdown(f"""
                 <span style="display:inline-block;width:24px;height:24px;line-height:24px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:6px;font-size:13px;">{icon_char}</span>
                 <strong style="font-size:16px;color:#ffffff;">{t_sym.replace('USDT','')}/USDT</strong>
                 <span style="background:{tf_badge_bg};color:#fff;font-size:11px;font-weight:800;padding:2px 6px;border-radius:3px;margin-left:4px;">{t_tf}</span><br/>
-                <span style="color:{dir_color};font-size:14px;font-weight:800;margin-left:30px;">{t_dir} · {fmt_px(t_entry)}</span>
+                <span style="color:{dir_color};font-size:14px;font-weight:800;margin-left:30px;">{t_dir}</span>
                 """, unsafe_allow_html=True)
 
             with cols[1]:
-                st.markdown(f"<div style='font-size:17px;font-weight:800;color:#ffffff;padding-top:6px;'>{fmt_px(live_px)}</div>", unsafe_allow_html=True)
+                st.markdown(f"""
+                <div style='font-size:16px;font-weight:900;color:#ffffff;'>Live: {fmt_px(live_px)}</div>
+                <div style='font-size:13px;font-weight:800;color:#ffffff;'>Entry: {fmt_px(t_entry)}</div>
+                <div style='font-size:13px;font-weight:800;color:{diff_color};'>({price_diff_pct:+.2f}%)</div>
+                """, unsafe_allow_html=True)
 
             with cols[2]:
                 st.markdown(f"<div style='font-size:15px;font-weight:700;color:#ffffff;padding-top:4px;'>{fmt_px(t_sl)}<br/><span style='color:#f87171;font-size:13px;font-weight:700;'>({sl_pct:+.2f}%)</span></div>", unsafe_allow_html=True)
@@ -309,7 +317,7 @@ now_pkt = now_utc.astimezone(pkt_tz)
 hdr_col1, hdr_col2, hdr_col3 = st.columns([3.2, 1.4, 1.4])
 with hdr_col1:
     st.markdown("## 🦖 Godzilla")
-    st.caption(f"🕒 Server Clock: **{now_pkt.strftime('%H:%M:%S')} PKT** ({now_utc.strftime('%H:%M:%S')} UTC)")
+    st.caption(f"🕒 Server Clock: **{now_pkt.strftime('%H:%M:%S')} PKT**")
 
 with hdr_col2:
     st.write("")
@@ -446,21 +454,39 @@ with tab_student:
             render_active_trades_table(trades_4h, tickers, "4H")
 
         st.markdown("---")
-        with st.expander(f"📚 Godzilla Backtest & Signal Audit Archive ({len(audit_archive)} Committed Signals)", expanded=False):
-            st.caption("Review historical backtested outcomes across 1-day, 1-week, and 1-month intervals to refine edge and win-rate assumptions.")
-            if audit_archive:
-                for idx, arch in enumerate(audit_archive):
+        st.subheader(f"📚 Godzilla Backtest & Signal Audit Archive ({len(audit_archive)} Committed Signals)")
+        
+        # Filter controls for audit logbook
+        audit_filter = st.radio("Audit Timeframe Filter", ["All Time", "Last 24 Hours (1 Day)", "Last 7 Days (1 Week)", "Last 30 Days (1 Month)"], horizontal=True)
+        
+        filtered_audit = []
+        now_ts = time.time()
+        for arch in audit_archive:
+            c_time = arch.get("committed_at", now_ts)
+            diff = now_ts - c_time
+            if audit_filter == "Last 24 Hours (1 Day)" and diff > 86400:
+                continue
+            if audit_filter == "Last 7 Days (1 Week)" and diff > 7 * 86400:
+                continue
+            if audit_filter == "Last 30 Days (1 Month)" and diff > 30 * 86400:
+                continue
+            filtered_audit.append(arch)
+
+        with st.expander(f"📖 Expanded Audit Logbook View ({len(filtered_audit)} Records Matching Filter)", expanded=True):
+            if filtered_audit:
+                for idx, arch in enumerate(filtered_audit):
                     c_dt = datetime.fromtimestamp(arch.get("committed_at", time.time()), tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
                     d_col = "#34d399" if arch.get('direction') == "LONG" else "#f87171"
-                    status_str = f" — <span style='color:#ef4444;'>{arch.get('status_note')}</span>" if arch.get('status_note') else ""
+                    status_note = arch.get('status_note', 'ACTIVE')
+                    status_color = "#ef4444" if "SL" in status_note else "#34d399"
                     st.markdown(f"""
-                    **#{idx+1} | {arch.get('symbol')} [{arch.get('timeframe')}] <span style='color:{d_col};'>{arch.get('direction')}</span>**{status_str} — Committed at: *{c_dt}*
+                    **#{idx+1} | {arch.get('symbol')} [{arch.get('timeframe')}] <span style='color:{d_col};'>{arch.get('direction')}</span>** — Status: <span style='color:{status_color};font-weight:900;'>{status_note}</span> — Committed: *{c_dt}*
                     * **Entry:** {fmt_px(arch.get('entry_price', 0))} | **Shared SL:** {fmt_px(arch.get('stop_loss', 0))}
                     * **Targets:** TP1: {fmt_px(arch.get('tp1', 0))} ({arch.get('eta_tp1', '')}) | TP2: {fmt_px(arch.get('tp2', 0))} ({arch.get('eta_tp2', '')}) | TP3: {fmt_px(arch.get('tp3', 0))} ({arch.get('eta_tp3', '')})
                     ---
                     """, unsafe_allow_html=True)
             else:
-                st.info("No audit history recorded yet. Commit signals from the scanner above to populate the backtest archive.")
+                st.info("No audit history matches the selected timeframe filter.")
 
     render_godzilla_dashboard()
 
@@ -512,6 +538,6 @@ with tab_pro:
     audit_logs = pro_snap.get("audit_archive", [])
     if audit_logs:
         for entry in audit_logs:
-            st.text(f"[{entry.get('symbol')} {entry.get('timeframe')}] {entry.get('direction')} @ {entry.get('entry_price')}")
+            st.text(f"[{entry.get('symbol')} {entry.get('timeframe')}] {entry.get('direction')} @ {entry.get('entry_price')} - {entry.get('status_note', 'ACTIVE')}")
     else:
         st.caption("No confirmed signals logged yet.")
