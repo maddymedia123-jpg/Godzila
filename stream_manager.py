@@ -265,3 +265,22 @@ class BinanceFuturesStreamManager:
                                     self.structural_zones,
                                     self.scanner_active,
                                     self.student_balance,
+                                )
+                                if metrics:
+                                    self._latest_states[sym] = metrics
+            return True
+
+        async def ws_loop():
+            while not self._stop_event.is_set():
+                try:
+                    await run_okx_ws()
+                except Exception as exc:
+                    with self._lock:
+                        self._connection_status = "RECONNECTING"
+                    logger.error(f"OKX WS error ({exc}), retrying in 2s...")
+                    await asyncio.sleep(2.0)
+
+        await asyncio.gather(seed_and_kline_loop(), ws_loop())
+
+    def shutdown(self):
+        self._stop_event.set()
