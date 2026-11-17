@@ -12,44 +12,49 @@ st.set_page_config(
 
 st.markdown("""
     <style>
-    .block-container { padding-top: 1.4rem; padding-bottom: 2rem; }
+    .block-container { padding-top: 1.4rem; padding-bottom: 2rem; background-color: #000000; color: #ffffff; }
     .stMetric {
-        background-color: #f8f9fb;
-        padding: 12px 14px;
+        background-color: #090e13;
+        padding: 14px 16px;
         border-radius: 8px;
-        border: 1px solid #e1e4e8;
+        border: 1px solid #1e293b;
     }
     .gz-tracker-header {
-        background: linear-gradient(90deg, #0d151c 0%, #13202b 100%);
+        background: linear-gradient(90deg, #05080c 0%, #0d151c 100%);
         color: #94a3b8;
-        font-size: 12px;
+        font-size: 13px;
         font-weight: 800;
         letter-spacing: 0.08em;
-        padding: 12px 16px;
+        padding: 14px 18px;
         border-radius: 8px 8px 0 0;
-        border: 1px solid #223240;
+        border: 1px solid #1e293b;
         margin-bottom: 6px;
     }
     .gz-row-container {
-        background: linear-gradient(90deg, #0f1922 0%, #14222e 50%, #0f1922 100%);
-        border: 1px solid #223240;
+        background: linear-gradient(90deg, #070d12 0%, #0d1620 50%, #070d12 100%);
+        border: 1px solid #1e293b;
         border-radius: 8px;
-        padding: 14px 16px;
-        margin-bottom: 10px;
+        padding: 16px 18px;
+        margin-bottom: 12px;
     }
     .gz-progress-track {
-        background-color: #1e293b;
+        background-color: #16202b;
         border-radius: 4px;
-        height: 8px;
+        height: 10px;
         width: 100%;
         overflow: hidden;
-        margin: 4px 0 8px 0;
-        border: 1px solid #334155;
+        margin: 6px 0 10px 0;
+        border: 1px solid #2b3a4a;
     }
     .gz-progress-fill-green {
         background: linear-gradient(90deg, #059669, #34d399);
         height: 100%;
-        box-shadow: 0 0 8px rgba(52, 211, 153, 0.4);
+        box-shadow: 0 0 10px rgba(52, 211, 153, 0.5);
+    }
+    .gz-progress-fill-red {
+        background: linear-gradient(90deg, #dc2626, #f87171);
+        height: 100%;
+        box-shadow: 0 0 10px rgba(248, 113, 113, 0.5);
     }
     </style>
 """, unsafe_allow_html=True)
@@ -86,9 +91,13 @@ def fmt_px(val: float) -> str:
 
 
 def render_signal_card(sig, mid_price: float, tf_tag: str):
+    is_long = sig.direction == "LONG"
+    card_border = "#059669" if is_long else "#dc2626"
+    dir_color = "#34d399" if is_long else "#f87171"
+
     with st.container(border=True):
         r1, r2, r3 = st.columns([2.2, 2.4, 1.6])
-        r1.markdown(f"### {sig.symbol} · **{sig.direction}** `[{sig.timeframe}]`")
+        r1.markdown(f"### {sig.symbol} · <span style='color:{dir_color};'>{sig.direction}</span> `[{sig.timeframe}]`", unsafe_allow_html=True)
         r2.markdown(f"**Strategy:** {sig.risk_tier}\n\n{sig.htf_summary}")
         r3.markdown(f"**Win Prob:** {sig.win_probability}% | **Lev:** {sig.leverage}x\n\n**Margin:** ${sig.margin_required_usd:,.2f}")
 
@@ -145,7 +154,7 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
     st.markdown("""
     <div class="gz-tracker-header">
-        <div style="display:grid;grid-template-columns:1.2fr 1.0fr 1.1fr 3.2fr 1.3fr 1.2fr 0.4fr;align-items:center;">
+        <div style="display:grid;grid-template-columns:1.3fr 1.1fr 1.2fr 3.2fr 1.4fr 1.3fr 0.4fr;align-items:center;">
             <div>ASSET / PAIR</div>
             <div>CURRENT PRICE</div>
             <div>SHARED SL</div>
@@ -175,13 +184,15 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
         if live_px <= 0:
             live_px = t_entry
 
+        is_long = t_dir == "LONG"
         sl_pct = ((t_sl - t_entry) / max(t_entry, 1e-8)) * 100.0
         icon_char, icon_color = COIN_BADGES.get(t_sym, ("◈", "#38bdf8"))
-        dir_color = "#34d399" if t_dir == "LONG" else "#f87171"
+        dir_color = "#34d399" if is_long else "#f87171"
+        fill_class = "gz-progress-fill-green" if is_long else "gz-progress-fill-red"
         tf_badge_bg = "#1d4ed8" if t_tf == "1H" else "#7c3aed"
 
         def get_progress_val(tp_val: float) -> float:
-            if t_dir == "LONG":
+            if is_long:
                 dist = max(tp_val - t_entry, 1e-8)
                 progress = live_px - t_entry
             else:
@@ -195,53 +206,53 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
         with st.container():
             st.markdown('<div class="gz-row-container">', unsafe_allow_html=True)
-            cols = st.columns([1.2, 1.0, 1.1, 3.2, 1.3, 1.2, 0.4])
+            cols = st.columns([1.3, 1.1, 1.2, 3.2, 1.4, 1.3, 0.4])
 
             with cols[0]:
                 st.markdown(f"""
-                <span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:6px;font-size:11px;">{icon_char}</span>
-                <strong style="font-size:14px;color:#fff;">{t_sym.replace('USDT','')}/USDT</strong>
-                <span style="background:{tf_badge_bg};color:#fff;font-size:10px;font-weight:800;padding:2px 5px;border-radius:3px;margin-left:4px;">{t_tf}</span><br/>
-                <span style="color:{dir_color};font-size:12px;font-weight:700;margin-left:26px;">{t_dir} · {fmt_px(t_entry)}</span>
+                <span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:6px;font-size:12px;">{icon_char}</span>
+                <strong style="font-size:15px;color:#ffffff;">{t_sym.replace('USDT','')}/USDT</strong>
+                <span style="background:{tf_badge_bg};color:#fff;font-size:10px;font-weight:800;padding:2px 6px;border-radius:3px;margin-left:4px;">{t_tf}</span><br/>
+                <span style="color:{dir_color};font-size:13px;font-weight:800;margin-left:28px;">{t_dir} · {fmt_px(t_entry)}</span>
                 """, unsafe_allow_html=True)
 
             with cols[1]:
-                st.markdown(f"<div style='font-size:15px;font-weight:700;color:#ffffff;padding-top:6px;'>{fmt_px(live_px)}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:16px;font-weight:800;color:#ffffff;padding-top:6px;'>{fmt_px(live_px)}</div>", unsafe_allow_html=True)
 
             with cols[2]:
-                st.markdown(f"<div style='font-size:13px;font-weight:600;color:#e2e8f0;padding-top:4px;'>{fmt_px(t_sl)}<br/><span style='color:#f87171;font-size:11px;'>({sl_pct:+.2f}%)</span></div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:14px;font-weight:700;color:#e2e8f0;padding-top:4px;'>{fmt_px(t_sl)}<br/><span style='color:#f87171;font-size:12px;font-weight:700;'>({sl_pct:+.2f}%)</span></div>", unsafe_allow_html=True)
 
             with cols[3]:
                 st.markdown(f"""
-                <div style="font-size:11px;color:#94a3b8;margin-bottom:2px;font-weight:700;">TP1 Progress: {p1_pct:.0f}%</div>
-                <div class="gz-progress-track"><div class="gz-progress-fill-green" style="width:{p1_pct}%;"></div></div>
-                <div style="font-size:11px;color:#94a3b8;margin-bottom:2px;font-weight:700;">TP2 Progress: {p2_pct:.0f}%</div>
-                <div class="gz-progress-track"><div class="gz-progress-fill-green" style="width:{p2_pct}%;"></div></div>
-                <div style="font-size:11px;color:#94a3b8;margin-bottom:2px;font-weight:700;">TP3 Progress: {p3_pct:.0f}%</div>
-                <div class="gz-progress-track"><div class="gz-progress-fill-green" style="width:{p3_pct}%;"></div></div>
+                <div style="font-size:12px;color:#cbd5e1;margin-bottom:1px;font-weight:800;">TP1 Progress: {p1_pct:.0f}%</div>
+                <div class="gz-progress-track"><div class="{fill_class}" style="width:{p1_pct}%;"></div></div>
+                <div style="font-size:12px;color:#cbd5e1;margin-bottom:1px;font-weight:800;">TP2 Progress: {p2_pct:.0f}%</div>
+                <div class="gz-progress-track"><div class="{fill_class}" style="width:{p2_pct}%;"></div></div>
+                <div style="font-size:12px;color:#cbd5e1;margin-bottom:1px;font-weight:800;">TP3 Progress: {p3_pct:.0f}%</div>
+                <div class="gz-progress-track"><div class="{fill_class}" style="width:{p3_pct}%;"></div></div>
                 """, unsafe_allow_html=True)
 
             with cols[4]:
                 st.markdown(f"""
-                <div style="font-size:11px;line-height:1.7;color:#e2e8f0;font-weight:600;padding-top:2px;">
-                    <div><strong>TP1:</strong> {fmt_px(t_tp1)}<br/><span style='color:#38bdf8;font-size:10px;'>🕒 {eta1}</span></div>
-                    <div><strong>TP2:</strong> {fmt_px(t_tp2)}<br/><span style='color:#38bdf8;font-size:10px;'>🕒 {eta2}</span></div>
-                    <div><strong>TP3:</strong> {fmt_px(t_tp3)}<br/><span style='color:#38bdf8;font-size:10px;'>🕒 {eta3}</span></div>
+                <div style="font-size:12px;line-height:1.7;color:#ffffff;font-weight:700;padding-top:2px;">
+                    <div><span style="color:#94a3b8;">TP1:</span> <strong style="color:#ffffff;">{fmt_px(t_tp1)}</strong><br/><span style='color:#38bdf8;font-size:11px;font-weight:700;'>🕒 {eta1}</span></div>
+                    <div><span style="color:#94a3b8;">TP2:</span> <strong style="color:#ffffff;">{fmt_px(t_tp2)}</strong><br/><span style='color:#38bdf8;font-size:11px;font-weight:700;'>🕒 {eta2}</span></div>
+                    <div><span style="color:#94a3b8;">TP3:</span> <strong style="color:#ffffff;">{fmt_px(t_tp3)}</strong><br/><span style='color:#38bdf8;font-size:11px;font-weight:700;'>🕒 {eta3}</span></div>
                 </div>
                 """, unsafe_allow_html=True)
 
             with cols[5]:
                 def status_badge(lbl: str, tp_val: float, hit: bool, pct: float) -> str:
                     if tr.get("sl_hit"):
-                        return "<span style='color:#ef4444;font-weight:800;font-size:11px;'>SL HIT</span>"
+                        return "<span style='color:#ef4444;font-weight:900;font-size:12px;'>SL HIT</span>"
                     if hit or pct >= 100.0:
-                        return f"<span style='color:#34d399;font-weight:800;font-size:11px;'>{lbl} HIT</span>"
-                    return f"<span style='color:#34d399;font-weight:600;font-size:11px;'>{pct:.0f}% to {lbl}</span>"
+                        return f"<span style='color:#34d399;font-weight:900;font-size:12px;'>{lbl} HIT</span>"
+                    return f"<span style='color:#34d399;font-weight:700;font-size:12px;'>{pct:.0f}% to {lbl}</span>"
 
                 b1 = status_badge("TP1", t_tp1, tr.get("tp1_hit", False), p1_pct)
                 b2 = status_badge("TP2", t_tp2, tr.get("tp2_hit", False), p2_pct)
                 b3 = status_badge("TP3", t_tp3, tr.get("tp3_hit", False), p3_pct)
-                st.markdown(f"<div style='line-height:1.9;padding-top:4px;'>{b1}<br/>{b2}<br/>{b3}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='line-height:2.0;padding-top:4px;'>{b1}<br/>{b2}<br/>{b3}</div>", unsafe_allow_html=True)
 
             with cols[6]:
                 st.write("")
@@ -332,7 +343,6 @@ with tab_student:
         imbalance = metrics.get("imbalance_t", 0.0)
         garch_vol = metrics.get("garch_sigma", 0.0045)
 
-        # Top Telemetry Row
         m1, m2, m3, m4 = st.columns(4)
         m1.metric(f"{coin} Live Price", fmt_px(mid_price))
         m2.metric("1H / 4H Structure", f"1H: {tf_bias.get('1H', '—')} | 4H: {tf_bias.get('4H', '—')}")
@@ -341,7 +351,6 @@ with tab_student:
 
         st.markdown("---")
 
-        # Liquidation & Structure Strip
         st.subheader(f"🔥 Godzilla Liquidation Clusters ({coin})")
         l1, l2, l3 = st.columns(3)
         l1.metric(
@@ -358,7 +367,6 @@ with tab_student:
 
         st.markdown("---")
 
-        # Decoupled 1H & 4H Signal Scanner Tabs
         st.subheader(f"📡 Godzilla Signal Scanner — {coin}")
         scan_tab_1h, scan_tab_4h = st.tabs([
             f"⚡ 1H Intraday Scanner ({len(signals_1h)})",
@@ -379,7 +387,6 @@ with tab_student:
             else:
                 st.info(f"🌊 **4H Swing Engine:** {status_4h}")
 
-        # Persistent Active Cloud Trades
         st.markdown("---")
         trades_1h = [t for t in active_trades if t.get("timeframe") == "1H"]
         trades_4h = [t for t in active_trades if t.get("timeframe") == "4H"]
@@ -400,21 +407,19 @@ with tab_student:
         with act_tab_4h:
             render_active_trades_table(trades_4h, tickers, "4H")
 
-        # ------------------------------------------------------------------
-        # BACKTESTING & AUDIT LOGBOOK (COLLAPSIBLE ARCHIVE FOR 1D/1W/1M REVIEW)
-        # ------------------------------------------------------------------
         st.markdown("---")
         with st.expander(f"📚 Godzilla Backtest & Signal Audit Archive ({len(audit_archive)} Committed Signals)", expanded=False):
             st.caption("Review historical backtested outcomes across 1-day, 1-week, and 1-month intervals to refine edge and win-rate assumptions.")
             if audit_archive:
                 for idx, arch in enumerate(audit_archive):
                     c_dt = datetime.fromtimestamp(arch.get("committed_at", time.time()), tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+                    d_col = "#34d399" if arch.get('direction') == "LONG" else "#f87171"
                     st.markdown(f"""
-                    **#{idx+1} | {arch.get('symbol')} [{arch.get('timeframe')}] {arch.get('direction')}** — Committed at: *{c_dt}*
+                    **#{idx+1} | {arch.get('symbol')} [{arch.get('timeframe')}] <span style='color:{d_col};'>{arch.get('direction')}</span>** — Committed at: *{c_dt}*
                     * **Entry:** {fmt_px(arch.get('entry_price', 0))} | **Shared SL:** {fmt_px(arch.get('stop_loss', 0))}
                     * **Targets:** TP1: {fmt_px(arch.get('tp1', 0))} ({arch.get('eta_tp1', '')}) | TP2: {fmt_px(arch.get('tp2', 0))} ({arch.get('eta_tp2', '')}) | TP3: {fmt_px(arch.get('tp3', 0))} ({arch.get('eta_tp3', '')})
                     ---
-                    """)
+                    """, unsafe_allow_html=True)
             else:
                 st.info("No audit history recorded yet. Commit signals from the scanner above to populate the backtest archive.")
 
