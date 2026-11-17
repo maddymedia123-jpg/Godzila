@@ -12,17 +12,26 @@ st.set_page_config(
 
 st.markdown("""
     <style>
-    .block-container { padding-top: 1.4rem; padding-bottom: 2rem; background-color: #000000; color: #ffffff; }
+    .block-container { padding-top: 1.4rem; padding-bottom: 2rem; background-color: #ffffff; color: #111827; }
     .stMetric {
-        background-color: #090e13;
+        background-color: #f8fafc;
         padding: 14px 16px;
         border-radius: 8px;
+        border: 1px solid #e2e8f0;
+    }
+    .gz-dark-wrapper {
+        background-color: #000000;
+        color: #ffffff;
+        padding: 20px;
+        border-radius: 12px;
         border: 1px solid #1e293b;
+        margin-top: 10px;
+        margin-bottom: 20px;
     }
     .gz-tracker-header {
         background: linear-gradient(90deg, #05080c 0%, #0d151c 100%);
         color: #94a3b8;
-        font-size: 13px;
+        font-size: 14px;
         font-weight: 800;
         letter-spacing: 0.08em;
         padding: 14px 18px;
@@ -36,6 +45,7 @@ st.markdown("""
         border-radius: 8px;
         padding: 16px 18px;
         margin-bottom: 12px;
+        color: #ffffff;
     }
     .gz-progress-track {
         background-color: #16202b;
@@ -92,7 +102,6 @@ def fmt_px(val: float) -> str:
 
 def render_signal_card(sig, mid_price: float, tf_tag: str):
     is_long = sig.direction == "LONG"
-    card_border = "#059669" if is_long else "#dc2626"
     dir_color = "#34d399" if is_long else "#f87171"
 
     with st.container(border=True):
@@ -152,6 +161,7 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
         st.caption(f"No active {tab_prefix} trades locked in Godzilla Cloud yet.")
         return
 
+    st.markdown('<div class="gz-dark-wrapper">', unsafe_allow_html=True)
     st.markdown("""
     <div class="gz-tracker-header">
         <div style="display:grid;grid-template-columns:1.3fr 1.1fr 1.2fr 3.2fr 1.4fr 1.3fr 0.4fr;align-items:center;">
@@ -185,6 +195,7 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
             live_px = t_entry
 
         is_long = t_dir == "LONG"
+        sl_hit = tr.get("sl_hit", False)
         sl_pct = ((t_sl - t_entry) / max(t_entry, 1e-8)) * 100.0
         icon_char, icon_color = COIN_BADGES.get(t_sym, ("◈", "#38bdf8"))
         dir_color = "#34d399" if is_long else "#f87171"
@@ -192,6 +203,8 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
         tf_badge_bg = "#1d4ed8" if t_tf == "1H" else "#7c3aed"
 
         def get_progress_val(tp_val: float) -> float:
+            if sl_hit:
+                return 0.0
             if is_long:
                 dist = max(tp_val - t_entry, 1e-8)
                 progress = live_px - t_entry
@@ -210,44 +223,52 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
             with cols[0]:
                 st.markdown(f"""
-                <span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:6px;font-size:12px;">{icon_char}</span>
-                <strong style="font-size:15px;color:#ffffff;">{t_sym.replace('USDT','')}/USDT</strong>
-                <span style="background:{tf_badge_bg};color:#fff;font-size:10px;font-weight:800;padding:2px 6px;border-radius:3px;margin-left:4px;">{t_tf}</span><br/>
-                <span style="color:{dir_color};font-size:13px;font-weight:800;margin-left:28px;">{t_dir} · {fmt_px(t_entry)}</span>
+                <span style="display:inline-block;width:24px;height:24px;line-height:24px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:6px;font-size:13px;">{icon_char}</span>
+                <strong style="font-size:16px;color:#ffffff;">{t_sym.replace('USDT','')}/USDT</strong>
+                <span style="background:{tf_badge_bg};color:#fff;font-size:11px;font-weight:800;padding:2px 6px;border-radius:3px;margin-left:4px;">{t_tf}</span><br/>
+                <span style="color:{dir_color};font-size:14px;font-weight:800;margin-left:30px;">{t_dir} · {fmt_px(t_entry)}</span>
                 """, unsafe_allow_html=True)
 
             with cols[1]:
-                st.markdown(f"<div style='font-size:16px;font-weight:800;color:#ffffff;padding-top:6px;'>{fmt_px(live_px)}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:17px;font-weight:800;color:#ffffff;padding-top:6px;'>{fmt_px(live_px)}</div>", unsafe_allow_html=True)
 
             with cols[2]:
-                st.markdown(f"<div style='font-size:14px;font-weight:700;color:#e2e8f0;padding-top:4px;'>{fmt_px(t_sl)}<br/><span style='color:#f87171;font-size:12px;font-weight:700;'>({sl_pct:+.2f}%)</span></div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:15px;font-weight:700;color:#e2e8f0;padding-top:4px;'>{fmt_px(t_sl)}<br/><span style='color:#f87171;font-size:13px;font-weight:700;'>({sl_pct:+.2f}%)</span></div>", unsafe_allow_html=True)
 
             with cols[3]:
-                st.markdown(f"""
-                <div style="font-size:12px;color:#cbd5e1;margin-bottom:1px;font-weight:800;">TP1 Progress: {p1_pct:.0f}%</div>
-                <div class="gz-progress-track"><div class="{fill_class}" style="width:{p1_pct}%;"></div></div>
-                <div style="font-size:12px;color:#cbd5e1;margin-bottom:1px;font-weight:800;">TP2 Progress: {p2_pct:.0f}%</div>
-                <div class="gz-progress-track"><div class="{fill_class}" style="width:{p2_pct}%;"></div></div>
-                <div style="font-size:12px;color:#cbd5e1;margin-bottom:1px;font-weight:800;">TP3 Progress: {p3_pct:.0f}%</div>
-                <div class="gz-progress-track"><div class="{fill_class}" style="width:{p3_pct}%;"></div></div>
-                """, unsafe_allow_html=True)
+                if sl_hit:
+                    st.markdown("""
+                    <div style="font-size:13px;color:#ef4444;font-weight:800;padding:12px 0;text-align:center;">STOP-LOSS HIT — MONITORING FROZEN</div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div style="font-size:13px;color:#cbd5e1;margin-bottom:2px;font-weight:800;">TP1 Progress: {p1_pct:.0f}%</div>
+                    <div class="gz-progress-track"><div class="{fill_class}" style="width:{p1_pct}%;"></div></div>
+                    <div style="font-size:13px;color:#cbd5e1;margin-bottom:2px;font-weight:800;">TP2 Progress: {p2_pct:.0f}%</div>
+                    <div class="gz-progress-track"><div class="{fill_class}" style="width:{p2_pct}%;"></div></div>
+                    <div style="font-size:13px;color:#cbd5e1;margin-bottom:2px;font-weight:800;">TP3 Progress: {p3_pct:.0f}%</div>
+                    <div class="gz-progress-track"><div class="{fill_class}" style="width:{p3_pct}%;"></div></div>
+                    """, unsafe_allow_html=True)
 
             with cols[4]:
-                st.markdown(f"""
-                <div style="font-size:12px;line-height:1.7;color:#ffffff;font-weight:700;padding-top:2px;">
-                    <div><span style="color:#94a3b8;">TP1:</span> <strong style="color:#ffffff;">{fmt_px(t_tp1)}</strong><br/><span style='color:#38bdf8;font-size:11px;font-weight:700;'>🕒 {eta1}</span></div>
-                    <div><span style="color:#94a3b8;">TP2:</span> <strong style="color:#ffffff;">{fmt_px(t_tp2)}</strong><br/><span style='color:#38bdf8;font-size:11px;font-weight:700;'>🕒 {eta2}</span></div>
-                    <div><span style="color:#94a3b8;">TP3:</span> <strong style="color:#ffffff;">{fmt_px(t_tp3)}</strong><br/><span style='color:#38bdf8;font-size:11px;font-weight:700;'>🕒 {eta3}</span></div>
-                </div>
-                """, unsafe_allow_html=True)
+                if sl_hit:
+                    st.markdown("<div style='font-size:13px;color:#94a3b8;font-weight:700;padding-top:14px;'>Target tracking halted at SL.</div>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div style="font-size:13px;line-height:1.7;color:#ffffff;font-weight:700;padding-top:2px;">
+                        <div><span style="color:#94a3b8;">TP1:</span> <strong style="color:#ffffff;">{fmt_px(t_tp1)}</strong><br/><span style='color:#38bdf8;font-size:12px;font-weight:700;'>🕒 {eta1}</span></div>
+                        <div><span style="color:#94a3b8;">TP2:</span> <strong style="color:#ffffff;">{fmt_px(t_tp2)}</strong><br/><span style='color:#38bdf8;font-size:12px;font-weight:700;'>🕒 {eta2}</span></div>
+                        <div><span style="color:#94a3b8;">TP3:</span> <strong style="color:#ffffff;">{fmt_px(t_tp3)}</strong><br/><span style='color:#38bdf8;font-size:12px;font-weight:700;'>🕒 {eta3}</span></div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
             with cols[5]:
                 def status_badge(lbl: str, tp_val: float, hit: bool, pct: float) -> str:
-                    if tr.get("sl_hit"):
-                        return "<span style='color:#ef4444;font-weight:900;font-size:12px;'>SL HIT</span>"
+                    if sl_hit:
+                        return "<span style='color:#ef4444;font-weight:900;font-size:13px;'>SL HIT</span>"
                     if hit or pct >= 100.0:
-                        return f"<span style='color:#34d399;font-weight:900;font-size:12px;'>{lbl} HIT</span>"
-                    return f"<span style='color:#34d399;font-weight:700;font-size:12px;'>{pct:.0f}% to {lbl}</span>"
+                        return f"<span style='color:#34d399;font-weight:900;font-size:13px;'>{lbl} HIT</span>"
+                    return f"<span style='color:#34d399;font-weight:700;font-size:13px;'>{pct:.0f}% to {lbl}</span>"
 
                 b1 = status_badge("TP1", t_tp1, tr.get("tp1_hit", False), p1_pct)
                 b2 = status_badge("TP2", t_tp2, tr.get("tp2_hit", False), p2_pct)
@@ -261,6 +282,8 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
                     st.rerun()
 
             st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # Header Bar
