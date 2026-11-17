@@ -46,7 +46,7 @@ st.markdown("""
         font-weight: 700;
         padding: 2px 8px;
         border-radius: 4px;
-        margin-bottom: 3px;
+        margin-bottom: 4px;
     }
     .gz-pill-red {
         display: inline-block;
@@ -57,7 +57,7 @@ st.markdown("""
         font-weight: 700;
         padding: 2px 8px;
         border-radius: 4px;
-        margin-bottom: 3px;
+        margin-bottom: 4px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -136,18 +136,18 @@ def build_proximity_bar_html(
         callout = f"<span style='color:#f87171;font-size:10px;font-weight:600;'>{rem_sl_pct:.2f}% to SL</span>"
 
     return f"""
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
-        <span style="width:30px;color:#8b9eb0;font-size:11px;font-weight:700;">{label}</span>
-        <div style="flex:1;display:flex;align-items:center;position:relative;height:14px;">
-            <div style="width:50%;height:5px;background:#1e293b;border-radius:3px 0 0 3px;display:flex;justify-content:flex-end;overflow:hidden;">
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+        <span style="width:28px;color:#8b9eb0;font-size:11px;font-weight:700;">{label}</span>
+        <div style="flex:1;display:flex;align-items:center;position:relative;height:12px;">
+            <div style="width:50%;height:4px;background:#1e293b;border-radius:2px 0 0 2px;display:flex;justify-content:flex-end;overflow:hidden;">
                 <div style="width:{pct_left:.1f}%;height:100%;background:linear-gradient(90deg,#ef4444,#f87171);"></div>
             </div>
-            <div style="width:2px;height:12px;background:#64748b;z-index:2;"></div>
-            <div style="width:50%;height:5px;background:#1e293b;border-radius:0 3px 3px 0;display:flex;justify-content:flex-start;overflow:hidden;">
-                <div style="width:{pct_right:.1f}%;height:100%;background:linear-gradient(90deg,#059669,#34d399);box-shadow:0 0 8px #10b981;"></div>
+            <div style="width:2px;height:10px;background:#64748b;z-index:2;"></div>
+            <div style="width:50%;height:4px;background:#1e293b;border-radius:0 2px 2px 0;display:flex;justify-content:flex-start;overflow:hidden;">
+                <div style="width:{pct_right:.1f}%;height:100%;background:linear-gradient(90deg,#059669,#34d399);box-shadow:0 0 6px #10b981;"></div>
             </div>
         </div>
-        <div style="width:145px;text-align:right;white-space:nowrap;">{badge} {callout}</div>
+        <div style="width:130px;text-align:right;white-space:nowrap;">{badge} {callout}</div>
     </div>
     """
 
@@ -212,7 +212,7 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
     st.markdown("""
     <div class="gz-tracker-header">
-        <div style="display:grid;grid-template-columns:1.35fr 1.1fr 1.2fr 3.2fr 1.1fr 1.15fr 0.4fr;align-items:center;">
+        <div style="display:grid;grid-template-columns:1.2fr 1.0fr 1.1fr 3.4fr 1.1fr 1.2fr 0.4fr;align-items:center;">
             <div>ASSET / PAIR</div>
             <div>CURRENT PRICE</div>
             <div>SHARED SL</div>
@@ -270,29 +270,29 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
         with row_cols[0]:
             st.markdown(f"""
             <div class="gz-row-card">
-                <div style="display:grid;grid-template-columns:1.35fr 1.15fr 1.25fr 3.35fr 1.15fr 1.15fr;align-items:center;gap:6px;">
+                <div style="display:grid;grid-template-columns:1.2fr 1.0fr 1.1fr 3.4fr 1.1fr 1.2fr;align-items:center;gap:6px;">
                     <div>
-                        <span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:6px;">{icon_char}</span>
-                        <strong style="font-size:14px;">{t_sym.replace('USDT','')}/USDT</strong>
-                        <span style="background:{tf_badge_bg};color:#fff;font-size:10px;font-weight:800;padding:1px 5px;border-radius:3px;margin-left:4px;">{t_tf}</span><br/>
-                        <span style="color:{dir_color};font-size:11px;font-weight:700;margin-left:28px;">{t_dir} · Entry {fmt_px(t_entry)}</span>
+                        <span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:4px;font-size:11px;">{icon_char}</span>
+                        <strong style="font-size:13px;">{t_sym.replace('USDT','')}/USDT</strong>
+                        <span style="background:{tf_badge_bg};color:#fff;font-size:9px;font-weight:800;padding:1px 4px;border-radius:3px;margin-left:3px;">{t_tf}</span><br/>
+                        <span style="color:{dir_color};font-size:11px;font-weight:700;margin-left:24px;">{t_dir} · {fmt_px(t_entry)}</span>
                     </div>
-                    <div style="font-size:15px;font-weight:700;color:#ffffff;">
+                    <div style="font-size:14px;font-weight:700;color:#ffffff;">
                         {fmt_px(live_px)}
                     </div>
-                    <div style="font-size:13px;font-weight:600;color:#e2e8f0;">
-                        {fmt_px(t_sl)} <span style="color:#f87171;font-size:11px;">({sl_pct:+.2f}%)</span>
+                    <div style="font-size:12px;font-weight:600;color:#e2e8f0;">
+                        {fmt_px(t_sl)} <span style="color:#f87171;font-size:10px;">({sl_pct:+.2f}%)</span>
                     </div>
                     <div>
                         {bar1}{bar2}{bar3}
                     </div>
-                    <div style="font-size:12px;line-height:1.65;color:#cbd5e1;font-weight:600;">
+                    <div style="font-size:11px;line-height:1.65;color:#cbd5e1;font-weight:600;">
                         <div>{fmt_px(t_tp1)}</div>
                         <div>{fmt_px(t_tp2)}</div>
                         <div>{fmt_px(t_tp3)}</div>
                     </div>
-                    <div style="line-height:1.4;">
-                        {p1_pill}<br/>{p2_pill}<br/>{p3_pill}
+                    <div>
+                        {p1_pill}{p2_pill}{p3_pill}
                     </div>
                 </div>
             </div>
