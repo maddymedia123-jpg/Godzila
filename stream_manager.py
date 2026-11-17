@@ -12,6 +12,14 @@ from quant_engine import QuantEngine
 
 logger = logging.getLogger("StreamManager")
 WATCHLIST_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+OKX_MAP = {
+    "BTCUSDT": "BTC-USDT-SWAP",
+    "ETHUSDT": "ETH-USDT-SWAP",
+    "SOLUSDT": "SOL-USDT-SWAP",
+    "XRPUSDT": "XRP-USDT-SWAP",
+    "DOGEUSDT": "DOGE-USDT-SWAP",
+}
+REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
 
 
 class BinanceFuturesStreamManager:
@@ -19,6 +27,9 @@ class BinanceFuturesStreamManager:
     BINANCE_REST_KLINES = "https://fapi.binance.com/fapi/v1/klines"
     BYBIT_WS_LINEAR = "wss://stream.bybit.com/v5/public/linear"
     BYBIT_REST_KLINES = "https://api.bybit.com/v5/market/kline"
+    OKX_WS_PUBLIC = "wss://ws.okx.com:8443/ws/v5/public"
+    OKX_REST_BOOKS = "https://www.okx.com/api/v5/market/books"
+    OKX_REST_CANDLES = "https://www.okx.com/api/v5/market/candles"
 
     def __init__(self, active_symbol: str = "BTCUSDT"):
         self.active_symbol = active_symbol.upper()
@@ -26,7 +37,7 @@ class BinanceFuturesStreamManager:
         self._lock = threading.Lock()
         self._latest_states: Dict[str, Dict[str, Any]] = {sym: {} for sym in WATCHLIST_SYMBOLS}
         self._connection_status: str = "INITIALIZING"
-        self._venue: str = "BINANCE"
+        self._venue: str = "OKX"
         self._msg_count: int = 0
 
         self._bids_books: Dict[str, Dict[float, float]] = {sym: {} for sym in WATCHLIST_SYMBOLS}
@@ -38,7 +49,6 @@ class BinanceFuturesStreamManager:
         self.risk_pct: float = 1.0
         self.structural_zones: List[float] = []
 
-        # Initialize Turso Cloud DB connection via Streamlit Secrets
         self.db = None
         self._init_turso_db()
 
@@ -59,7 +69,6 @@ class BinanceFuturesStreamManager:
                     updated_at REAL
                 );
             """)
-            logger.info("Successfully connected to Turso Database and verified schema.")
         except Exception as exc:
             logger.error(f"Turso DB initialization failed: {exc}")
 
@@ -151,69 +160,101 @@ class BinanceFuturesStreamManager:
         loop.run_until_complete(self._supervisor())
 
     async def _supervisor(self) -> None:
-        async def kline_loop():
+        async def seed_and_kline_loop():
             async with aiohttp.ClientSession() as session:
                 while not self._stop_event.is_set():
                     for sym in WATCHLIST_SYMBOLS:
-                        fetched = False
-                        # 1. Try Binance Futures Klines
+                        inst_id = OKX_MAP[sym]
+                        # 1. Immediate REST Orderbook Seed via OKX (unblocked globally)
                         try:
-                            params = {"symbol": sym, "interval": "15m", "limit": 200}
-                            async with session.get(self.BINANCE_REST_KLINES, params=params, timeout=5) as resp:
+                            async with session.get(
+                                self.OKX_REST_BOOKS,
+                                params={"instId": inst_id, "sz": "20"},
+                                timeout=5,
+                            ) as resp:
                                 if resp.status == 200:
-                                    data = await resp.json()
-                                    closes = [float(c[4]) for c in data]
-                                    with self._lock:
-                                        self.engines[sym].fit_garch(closes)
-                                    fetched = True
+                                    payload = await resp.json()
+                                    book = payload.get("data", [{}])[0]
+                                    bids = [(float(x[0]), float(x[1])) for x in book.get("bids", []) if float(x[1]) > 0]
+                                    asks = [(float(x[0]), float(x[1])) for x in book.get("asks", []) if float(x[1]) > 0]
+                                    if bids and asks:
+                                        with self._lock:
+                                            self._msg_count += 1
+                                            eng = self.engines[sym]
+                                            metrics = eng.process_orderbook(
+                                                time.time(),
+                                                bids,
+                                                asks,
+                                                sym,
+                                                self.account_balance,
+                                                self.risk_pct,
+                                                self.structural_zones,
+                                                self.scanner_active,
+                                                self.student_balance,
+                                            )
+                                            if metrics:
+                                                self._latest_states[sym] = metrics
                         except Exception:
                             pass
 
-                        # 2. Fallback to Bybit Linear Klines if Binance is geo-blocked
-                        if not fetched:
-                            try:
-                                b_params = {"category": "linear", "symbol": sym, "interval": "15", "limit": 200}
-                                async with session.get(self.BYBIT_REST_KLINES, params=b_params, timeout=5) as resp:
-                                    if resp.status == 200:
-                                        payload = await resp.json()
-                                        rows = payload.get("result", {}).get("list", [])
-                                        closes = [float(r[4]) for r in reversed(rows)]
-                                        with self._lock:
-                                            self.engines[sym].fit_garch(closes)
-                            except Exception:
-                                pass
-                        await asyncio.sleep(0.2)
-                    await asyncio.sleep(600)
+                        # 2. GARCH Volatility Calibration via OKX Candles
+                        try:
+                            async with session.get(
+                                self.OKX_REST_CANDLES,
+                                params={"instId": inst_id, "bar": "15m", "limit": "200"},
+                                timeout=5,
+                            ) as resp:
+                                if resp.status == 200:
+                                    payload = await resp.json()
+                                    rows = payload.get("data", [])
+                                    closes = [float(r[4]) for r in reversed(rows)]
+                                    with self._lock:
+                                        self.engines[sym].fit_garch(closes)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.15)
+                    await asyncio.sleep(300)
 
-        async def run_binance_ws() -> bool:
-            streams = "/".join(
-                [f"{s.lower()}@depth20@100ms" for s in WATCHLIST_SYMBOLS]
-                + [f"{s.lower()}@aggTrade" for s in WATCHLIST_SYMBOLS]
-            )
-            url = f"{self.BINANCE_WS_COMBINED}?streams={streams}"
-            async with websockets.connect(url, ping_timeout=15, open_timeout=8) as ws:
+        async def run_okx_ws() -> bool:
+            async with websockets.connect(self.OKX_WS_PUBLIC, ping_interval=15, ping_timeout=10, open_timeout=8) as ws:
+                args = []
+                for inst_id in OKX_MAP.values():
+                    args.append({"channel": "books5", "instId": inst_id})
+                    args.append({"channel": "trades", "instId": inst_id})
+                await ws.send(json.dumps({"op": "subscribe", "args": args}))
+
                 with self._lock:
-                    self._connection_status = "LIVE BINANCE"
-                    self._venue = "BINANCE"
+                    self._connection_status = "LIVE OKX PERP"
+                    self._venue = "OKX"
+
                 while not self._stop_event.is_set():
-                    raw = await asyncio.wait_for(ws.recv(), timeout=8.0)
+                    raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
+                    if raw == "pong":
+                        continue
                     p = json.loads(raw)
-                    stream, data = p.get("stream", ""), p.get("data", {})
-                    sym = stream.split("@")[0].upper()
-                    if sym in self.engines:
-                        with self._lock:
-                            self._msg_count += 1
-                            eng = self.engines[sym]
-                            if "@aggTrade" in stream:
+                    arg = p.get("arg", {})
+                    channel = arg.get("channel", "")
+                    inst_id = arg.get("instId", "")
+                    sym = REV_OKX_MAP.get(inst_id)
+                    if not sym or "data" not in p:
+                        continue
+
+                    with self._lock:
+                        self._msg_count += 1
+                        eng = self.engines[sym]
+                        if channel == "trades":
+                            for tr in p["data"]:
                                 eng.ingest_trade(
-                                    float(data["T"]) / 1000.0,
-                                    float(data["p"]),
-                                    float(data["q"]),
-                                    bool(data["m"]),
+                                    float(tr["ts"]) / 1000.0,
+                                    float(tr["px"]),
+                                    float(tr["sz"]),
+                                    tr.get("side") == "sell",
                                 )
-                            elif "@depth20" in stream:
-                                bids = [(float(x), float(y)) for x, y in data.get("b", []) if float(y) > 0]
-                                asks = [(float(x), float(y)) for x, y in data.get("a", []) if float(y) > 0]
+                        elif channel == "books5":
+                            book = p["data"][0]
+                            bids = [(float(x[0]), float(x[1])) for x in book.get("bids", []) if float(x[1]) > 0]
+                            asks = [(float(x[0]), float(x[1])) for x in book.get("asks", []) if float(x[1]) > 0]
+                            if bids and asks:
                                 metrics = eng.process_orderbook(
                                     time.time(),
                                     bids,
@@ -224,94 +265,3 @@ class BinanceFuturesStreamManager:
                                     self.structural_zones,
                                     self.scanner_active,
                                     self.student_balance,
-                                )
-                                if metrics:
-                                    self._latest_states[sym] = metrics
-            return True
-
-        async def run_bybit_ws() -> bool:
-            async with websockets.connect(self.BYBIT_WS_LINEAR, ping_timeout=15, open_timeout=8) as ws:
-                sub_args = [f"orderbook.50.{s}" for s in WATCHLIST_SYMBOLS] + [f"publicTrade.{s}" for s in WATCHLIST_SYMBOLS]
-                await ws.send(json.dumps({"op": "subscribe", "args": sub_args}))
-                with self._lock:
-                    self._connection_status = "LIVE BYBIT LINEAR"
-                    self._venue = "BYBIT"
-
-                while not self._stop_event.is_set():
-                    raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
-                    p = json.loads(raw)
-                    topic = p.get("topic", "")
-                    if not topic:
-                        continue
-                    parts = topic.split(".")
-                    sym = parts[-1].upper()
-                    if sym not in self.engines:
-                        continue
-
-                    data = p.get("data", {})
-                    with self._lock:
-                        self._msg_count += 1
-                        eng = self.engines[sym]
-                        if topic.startswith("publicTrade."):
-                            for tr in data:
-                                eng.ingest_trade(
-                                    float(tr["T"]) / 1000.0,
-                                    float(tr["p"]),
-                                    float(tr["v"]),
-                                    tr.get("S") == "Sell",
-                                )
-                        elif topic.startswith("orderbook."):
-                            msg_type = p.get("type", "snapshot")
-                            if msg_type == "snapshot":
-                                self._bids_books[sym] = {float(x): float(y) for x, y in data.get("b", []) if float(y) > 0}
-                                self._asks_books[sym] = {float(x): float(y) for x, y in data.get("a", []) if float(y) > 0}
-                            else:
-                                for x, y in data.get("b", []):
-                                    px, sz = float(x), float(y)
-                                    if sz == 0:
-                                        self._bids_books[sym].pop(px, None)
-                                    else:
-                                        self._bids_books[sym][px] = sz
-                                for x, y in data.get("a", []):
-                                    px, sz = float(x), float(y)
-                                    if sz == 0:
-                                        self._asks_books[sym].pop(px, None)
-                                    else:
-                                        self._asks_books[sym][px] = sz
-
-                            sorted_bids = sorted(self._bids_books[sym].items(), key=lambda item: item[0], reverse=True)[:20]
-                            sorted_asks = sorted(self._asks_books[sym].items(), key=lambda item: item[0])[:20]
-
-                            metrics = eng.process_orderbook(
-                                time.time(),
-                                sorted_bids,
-                                sorted_asks,
-                                sym,
-                                self.account_balance,
-                                self.risk_pct,
-                                self.structural_zones,
-                                self.scanner_active,
-                                self.student_balance,
-                            )
-                            if metrics:
-                                self._latest_states[sym] = metrics
-            return True
-
-        async def ws_loop():
-            while not self._stop_event.is_set():
-                try:
-                    await run_binance_ws()
-                except Exception as b_exc:
-                    logger.warning(f"Binance WS unavailable ({b_exc}), failing over to Bybit Linear...")
-                    try:
-                        await run_bybit_ws()
-                    except Exception as y_exc:
-                        with self._lock:
-                            self._connection_status = "RECONNECTING"
-                        logger.error(f"Bybit WS error ({y_exc}), retrying in 3s...")
-                        await asyncio.sleep(3.0)
-
-        await asyncio.gather(kline_loop(), ws_loop())
-
-    def shutdown(self):
-        self._stop_event.set()
