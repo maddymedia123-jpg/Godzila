@@ -3,7 +3,6 @@ from datetime import datetime, timezone, timedelta
 import streamlit as st
 from stream_manager import BinanceFuturesStreamManager
 
-# 1. Page Configuration (Must be the very first Streamlit command)
 st.set_page_config(
     page_title="Godzilla — Institutional & Student Quantitative Terminal",
     page_icon="🦖",
@@ -11,7 +10,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Custom Styling
 st.markdown("""
     <style>
     .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
@@ -24,21 +22,18 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 2. Initialize Stream Manager (Cached Resource with Turso DB connection)
 @st.cache_resource
 def get_stream_manager():
     return BinanceFuturesStreamManager(active_symbol="BTCUSDT")
 
 manager = get_stream_manager()
 
-# 3. Session State Initialization
 ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 if "student_coin" not in st.session_state:
     st.session_state.student_coin = "BTCUSDT"
 if "student_balance" not in st.session_state:
     st.session_state.student_balance = 100.00
 
-# 4. Header Bar & Live Controls
 pkt_tz = timezone(timedelta(hours=5))
 now_utc = datetime.now(timezone.utc)
 now_pkt = now_utc.astimezone(pkt_tz)
@@ -56,15 +51,11 @@ with hdr_col3:
     st.write("")
     auto_refresh = st.toggle("⚡ Real-Time Stream (500ms)", value=True)
 
-# 5. Main Navigation Tabs
 tab_student, tab_pro = st.tabs([
     "🎯 Godzilla Student State-Locked Signals (15m · 1H · 4H)",
     "🔬 Godzilla Pro Order Book Terminal"
 ])
 
-# ---------------------------------------------------------
-# TAB 1: GODZILLA STUDENT STATE-LOCKED SIGNALS
-# ---------------------------------------------------------
 with tab_student:
     ctrl_col1, ctrl_col2 = st.columns([2.2, 1.3])
     with ctrl_col1:
@@ -108,7 +99,6 @@ with tab_student:
         candidates = snap.get("candidate_signals", [])
         tickers = snap.get("coin_tickers", {})
 
-        # Fallback to coin_tickers if orderbook mid_price hasn't populated yet
         mid_price = metrics.get("mid_price", 0.0)
         if mid_price <= 0.0 and coin in tickers:
             t_data = tickers[coin]
@@ -117,23 +107,14 @@ with tab_student:
         imbalance = metrics.get("imbalance_t", 0.0)
         garch_vol = metrics.get("garch_sigma", 0.0045)
 
-        # Top Live Telemetry Strip
         m1, m2, m3, m4 = st.columns(4)
         m1.metric(f"{coin} Mark Price", f"${mid_price:,.4f}" if 0 < mid_price < 10 else f"${mid_price:,.2f}")
         m2.metric("Orderbook Imbalance", f"{imbalance:+.3f}")
         m3.metric("GARCH Volatility (σ)", f"{garch_vol * 100:.3f}%")
         m4.metric("Stream Ticks", f"{snap.get('msg_count', 0):,}")
 
-        if mid_price == 0.0:
-            st.warning(
-                f"⚠️ Stream is active ({snap.get('msg_count', 0)} ticks), but {coin} price feed returned $0.00. "
-                "If Binance Futures is geo-blocked on Streamlit Cloud US servers, check `stream_manager.py` to ensure "
-                "Bybit/KuCoin or Binance Vision (`data-api.binance.vision`) fallback is active."
-            )
-
         st.markdown("---")
 
-        # Coinglass Liquidation Cluster Section
         st.subheader(f"🔥 Godzilla Liquidation Clusters & OI Bias ({coin})")
         l1, l2, l3 = st.columns(3)
         l1.metric(
@@ -150,7 +131,6 @@ with tab_student:
 
         st.markdown("---")
 
-        # Candidate Signals & State-Locking (Turso Persistence)
         st.subheader("📡 Godzilla State-Locked Signal Scanner")
         if candidates:
             for idx, sig in enumerate(candidates):
@@ -203,11 +183,10 @@ with tab_student:
                         if hasattr(manager, "save_state_to_turso"):
                             manager.save_state_to_turso(f"locked_signal_{s_sym}", payload)
                         st.session_state[f"local_lock_{s_sym}"] = payload
-                        st.success(f"Signal locked and persisted to Turso DB for {s_sym}!")
+                        st.success(f"Signal locked and persisted for {s_sym}!")
         else:
-            st.info(f"Scanning {coin} order book microstructure for ≥ 0.25 directional imbalance...")
+            st.info(f"Scanning {coin} order book microstructure for ≥ 0.20 directional imbalance...")
 
-        # Active Locked Trade Viewer
         st.markdown("---")
         st.subheader(f"💾 Godzilla Active State-Locked Position ({coin})")
         locked_trade = None
@@ -231,9 +210,6 @@ with tab_student:
 
     render_student_dashboard()
 
-# ---------------------------------------------------------
-# TAB 2: GODZILLA PRO ORDER BOOK TERMINAL
-# ---------------------------------------------------------
 with tab_pro:
     st.subheader("🔬 Godzilla Microstructure & Hyperparameter Controls")
     p_col1, p_col2, p_col3, p_col4 = st.columns(4)
@@ -273,10 +249,10 @@ with tab_pro:
     ob_col1, ob_col2 = st.columns(2)
     with ob_col1:
         st.markdown("**Top Bids (Price, Size)**")
-        st.dataframe(pro_metrics.get("raw_bids", [])[:15], use_container_width=True)
+        st.dataframe(pro_metrics.get("raw_bids", [])[:15], width="stretch")
     with ob_col2:
         st.markdown("**Top Asks (Price, Size)**")
-        st.dataframe(pro_metrics.get("raw_asks", [])[:15], use_container_width=True)
+        st.dataframe(pro_metrics.get("raw_asks", [])[:15], width="stretch")
 
     st.markdown("**Godzilla Audit Logbook**")
     audit_logs = pro_snap.get("audit_logbook", [])
