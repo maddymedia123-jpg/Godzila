@@ -12,12 +12,13 @@ st.set_page_config(
 
 st.markdown("""
     <style>
-    .block-container { padding-top: 1.4rem; padding-bottom: 2rem; background-color: #ffffff; color: #111827; }
+    .block-container { padding-top: 1.4rem; padding-bottom: 2rem; background-color: #000000; color: #ffffff; }
     .stMetric {
-        background-color: #f8fafc;
+        background-color: #090e13;
         padding: 14px 16px;
         border-radius: 8px;
-        border: 1px solid #e2e8f0;
+        border: 1px solid #1e293b;
+        color: #ffffff;
     }
     .gz-dark-wrapper {
         background-color: #000000;
@@ -30,7 +31,7 @@ st.markdown("""
     }
     .gz-tracker-header {
         background: linear-gradient(90deg, #05080c 0%, #0d151c 100%);
-        color: #94a3b8;
+        color: #ffffff;
         font-size: 14px;
         font-weight: 800;
         letter-spacing: 0.08em;
@@ -196,13 +197,19 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
         is_long = t_dir == "LONG"
         sl_hit = tr.get("sl_hit", False)
+        tp1_hit = tr.get("tp1_hit", False)
+        tp2_hit = tr.get("tp2_hit", False)
+        tp3_hit = tr.get("tp3_hit", False)
+
         sl_pct = ((t_sl - t_entry) / max(t_entry, 1e-8)) * 100.0
         icon_char, icon_color = COIN_BADGES.get(t_sym, ("◈", "#38bdf8"))
         dir_color = "#34d399" if is_long else "#f87171"
         fill_class = "gz-progress-fill-green" if is_long else "gz-progress-fill-red"
         tf_badge_bg = "#1d4ed8" if t_tf == "1H" else "#7c3aed"
 
-        def get_progress_val(tp_val: float) -> float:
+        def get_progress_val(tp_val: float, hit: bool) -> float:
+            if hit or tp3_hit:
+                return 100.0
             if sl_hit:
                 return 0.0
             if is_long:
@@ -213,9 +220,9 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
                 progress = t_entry - live_px
             return float(min(100.0, max(0.0, (progress / dist) * 100.0)))
 
-        p1_pct = get_progress_val(t_tp1)
-        p2_pct = get_progress_val(t_tp2)
-        p3_pct = get_progress_val(t_tp3)
+        p1_pct = get_progress_val(t_tp1, tp1_hit)
+        p2_pct = get_progress_val(t_tp2, tp2_hit)
+        p3_pct = get_progress_val(t_tp3, tp3_hit)
 
         with st.container():
             st.markdown('<div class="gz-row-container">', unsafe_allow_html=True)
@@ -233,7 +240,7 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
                 st.markdown(f"<div style='font-size:17px;font-weight:800;color:#ffffff;padding-top:6px;'>{fmt_px(live_px)}</div>", unsafe_allow_html=True)
 
             with cols[2]:
-                st.markdown(f"<div style='font-size:15px;font-weight:700;color:#e2e8f0;padding-top:4px;'>{fmt_px(t_sl)}<br/><span style='color:#f87171;font-size:13px;font-weight:700;'>({sl_pct:+.2f}%)</span></div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:15px;font-weight:700;color:#ffffff;padding-top:4px;'>{fmt_px(t_sl)}<br/><span style='color:#f87171;font-size:13px;font-weight:700;'>({sl_pct:+.2f}%)</span></div>", unsafe_allow_html=True)
 
             with cols[3]:
                 if sl_hit:
@@ -242,11 +249,17 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
                     """, unsafe_allow_html=True)
                 else:
                     st.markdown(f"""
-                    <div style="font-size:13px;color:#cbd5e1;margin-bottom:2px;font-weight:800;">TP1 Progress: {p1_pct:.0f}%</div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#ffffff;margin-bottom:2px;font-weight:800;">
+                        <span>TP1 Progress:</span><span style="color:#34d399;">{p1_pct:.0f}%</span>
+                    </div>
                     <div class="gz-progress-track"><div class="{fill_class}" style="width:{p1_pct}%;"></div></div>
-                    <div style="font-size:13px;color:#cbd5e1;margin-bottom:2px;font-weight:800;">TP2 Progress: {p2_pct:.0f}%</div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#ffffff;margin-bottom:2px;font-weight:800;">
+                        <span>TP2 Progress:</span><span style="color:#34d399;">{p2_pct:.0f}%</span>
+                    </div>
                     <div class="gz-progress-track"><div class="{fill_class}" style="width:{p2_pct}%;"></div></div>
-                    <div style="font-size:13px;color:#cbd5e1;margin-bottom:2px;font-weight:800;">TP3 Progress: {p3_pct:.0f}%</div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#ffffff;margin-bottom:2px;font-weight:800;">
+                        <span>TP3 Progress:</span><span style="color:#34d399;">{p3_pct:.0f}%</span>
+                    </div>
                     <div class="gz-progress-track"><div class="{fill_class}" style="width:{p3_pct}%;"></div></div>
                     """, unsafe_allow_html=True)
 
@@ -266,13 +279,15 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
                 def status_badge(lbl: str, tp_val: float, hit: bool, pct: float) -> str:
                     if sl_hit:
                         return "<span style='color:#ef4444;font-weight:900;font-size:13px;'>SL HIT</span>"
+                    if tp3_hit and lbl == "TP3":
+                        return "<span style='color:#34d399;font-weight:900;font-size:13px;'>ALL TPs HIT</span>"
                     if hit or pct >= 100.0:
                         return f"<span style='color:#34d399;font-weight:900;font-size:13px;'>{lbl} HIT</span>"
                     return f"<span style='color:#34d399;font-weight:700;font-size:13px;'>{pct:.0f}% to {lbl}</span>"
 
-                b1 = status_badge("TP1", t_tp1, tr.get("tp1_hit", False), p1_pct)
-                b2 = status_badge("TP2", t_tp2, tr.get("tp2_hit", False), p2_pct)
-                b3 = status_badge("TP3", t_tp3, tr.get("tp3_hit", False), p3_pct)
+                b1 = status_badge("TP1", t_tp1, tp1_hit, p1_pct)
+                b2 = status_badge("TP2", t_tp2, tp2_hit, p2_pct)
+                b3 = status_badge("TP3", t_tp3, tp3_hit, p3_pct)
                 st.markdown(f"<div style='line-height:2.0;padding-top:4px;'>{b1}<br/>{b2}<br/>{b3}</div>", unsafe_allow_html=True)
 
             with cols[6]:
@@ -437,8 +452,9 @@ with tab_student:
                 for idx, arch in enumerate(audit_archive):
                     c_dt = datetime.fromtimestamp(arch.get("committed_at", time.time()), tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
                     d_col = "#34d399" if arch.get('direction') == "LONG" else "#f87171"
+                    status_str = f" — <span style='color:#ef4444;'>{arch.get('status_note')}</span>" if arch.get('status_note') else ""
                     st.markdown(f"""
-                    **#{idx+1} | {arch.get('symbol')} [{arch.get('timeframe')}] <span style='color:{d_col};'>{arch.get('direction')}</span>** — Committed at: *{c_dt}*
+                    **#{idx+1} | {arch.get('symbol')} [{arch.get('timeframe')}] <span style='color:{d_col};'>{arch.get('direction')}</span>**{status_str} — Committed at: *{c_dt}*
                     * **Entry:** {fmt_px(arch.get('entry_price', 0))} | **Shared SL:** {fmt_px(arch.get('stop_loss', 0))}
                     * **Targets:** TP1: {fmt_px(arch.get('tp1', 0))} ({arch.get('eta_tp1', '')}) | TP2: {fmt_px(arch.get('tp2', 0))} ({arch.get('eta_tp2', '')}) | TP3: {fmt_px(arch.get('tp3', 0))} ({arch.get('eta_tp3', '')})
                     ---
