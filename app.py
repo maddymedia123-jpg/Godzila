@@ -1,478 +1,470 @@
 import time
-from datetime import datetime, timezone, timedelta
-import streamlit as st
-from stream_manager import BinanceFuturesStreamManager
+from datetime import datetime, timezone
+import logging
+from collections import deque
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+import numpy as np
+from arch import arch_model
 
-st.set_page_config(
-    page_title="Godzilla",
-    page_icon="🦖",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-st.markdown("""
-    <style>
-    .block-container { padding-top: 1.4rem; padding-bottom: 2rem; }
-    .stMetric {
-        background-color: #f8f9fb;
-        padding: 12px 14px;
-        border-radius: 8px;
-        border: 1px solid #e1e4e8;
-    }
-    .gz-tracker-header {
-        background: linear-gradient(90deg, #0d151c 0%, #13202b 100%);
-        color: #8b9eb0;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        padding: 10px 14px;
-        border-radius: 8px 8px 0 0;
-        border: 1px solid #223240;
-    }
-    .gz-row-card {
-        background: linear-gradient(90deg, #0f1922 0%, #14222e 50%, #0f1922 100%);
-        color: #e6edf3;
-        padding: 12px 14px;
-        border-left: 1px solid #223240;
-        border-right: 1px solid #223240;
-        border-bottom: 1px solid #1e2d3a;
-    }
-    .gz-pill-green {
-        display: inline-block;
-        background: rgba(16, 185, 129, 0.18);
-        border: 1px solid #10b981;
-        color: #34d399;
-        font-size: 11px;
-        font-weight: 700;
-        padding: 2px 8px;
-        border-radius: 4px;
-        margin-bottom: 3px;
-    }
-    .gz-pill-red {
-        display: inline-block;
-        background: rgba(239, 68, 68, 0.18);
-        border: 1px solid #ef4444;
-        color: #f87171;
-        font-size: 11px;
-        font-weight: 700;
-        padding: 2px 8px;
-        border-radius: 4px;
-        margin-bottom: 3px;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-@st.cache_resource
-def get_stream_manager():
-    return BinanceFuturesStreamManager(active_symbol="BTCUSDT")
-
-manager = get_stream_manager()
-
-ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
-COIN_BADGES = {
-    "BTCUSDT": ("₿", "#f7931a"),
-    "ETHUSDT": ("Ξ", "#627eea"),
-    "SOLUSDT": ("◎", "#14f195"),
-    "XRPUSDT": ("✕", "#00aae4"),
-    "DOGEUSDT": ("Ð", "#c2a633"),
-}
-
-if "student_coin" not in st.session_state:
-    st.session_state.student_coin = "BTCUSDT"
-if "student_balance" not in st.session_state:
-    st.session_state.student_balance = 100.00
+logger = logging.getLogger("QuantEngine")
 
 
-def fmt_px(val: float) -> str:
-    if val <= 0:
-        return "$0.00"
-    if val < 1.0:
-        return f"${val:,.4f}"
-    if val < 100.0:
-        return f"${val:,.3f}"
-    return f"${val:,.2f}"
+@dataclass
+class CommittedSignal:
+    signal_id: str
+    timestamp: float
+    symbol: str
+    timeframe: str          # "1H" or "4H"
+    risk_tier: str
+    direction: str          # "LONG" or "SHORT"
+    entry_price: float
+    stop_loss: float
+    tp1: float
+    tp2: float
+    tp3: float
+    position_size_units: float
+    position_notional_usd: float
+    margin_required_usd: float
+    leverage: int
+    win_probability: int
+    eta_tp1_str: str
+    eta_tp2_str: str
+    eta_tp3_str: str
+    htf_summary: str
+    risk_warning: str
+    entry_status: str = "ENTER TRADE NOW (IN OPTIMAL ZONE)"
+    can_enter: bool = True
+    status: str = "CANDIDATE_READY"
 
 
-def build_proximity_bar_html(
-    label: str,
-    entry: float,
-    curr: float,
-    sl: float,
-    tp: float,
-    direction: str,
-    tp_hit: bool,
-    sl_hit: bool,
-) -> str:
+class QuantEngine:
     """
-    Renders a dual-sided center-zero proximity gauge:
-    Left half = Entry -> Shared SL (Red)
-    Right half = Entry -> TP Target (Emerald Green)
-    """
-    if direction == "LONG":
-        sl_dist = max(entry - sl, 1e-8)
-        tp_dist = max(tp - entry, 1e-8)
-        move = curr - entry
-    else:
-        sl_dist = max(sl - entry, 1e-8)
-        tp_dist = max(entry - tp, 1e-8)
-        move = entry - curr
-
-    if tp_hit or move >= tp_dist:
-        pct_right = 100.0
-        pct_left = 0.0
-        badge = f"<span style='background:#10b981;color:#042f2e;font-weight:800;font-size:10px;padding:1px 6px;border-radius:4px;'>{label} HIT</span>"
-        callout = f"<span style='color:#34d399;font-size:10px;font-weight:700;'>TARGET REACHED</span>"
-    elif sl_hit or move <= -sl_dist:
-        pct_right = 0.0
-        pct_left = 100.0
-        badge = f"<span style='background:#ef4444;color:#fff;font-weight:800;font-size:10px;padding:1px 6px;border-radius:4px;'>SL HIT</span>"
-        callout = f"<span style='color:#f87171;font-size:10px;font-weight:700;'>STOPPED OUT</span>"
-    elif move >= 0:
-        pct_right = min(100.0, (move / tp_dist) * 100.0)
-        pct_left = 0.0
-        rem_pct = abs((tp - curr) / max(curr, 1e-8)) * 100.0
-        badge = ""
-        callout = f"<span style='color:#34d399;font-size:10px;font-weight:600;'>+{rem_pct:.2f}% to {label}</span>"
-    else:
-        pct_left = min(100.0, (abs(move) / sl_dist) * 100.0)
-        pct_right = 0.0
-        rem_sl_pct = abs((curr - sl) / max(curr, 1e-8)) * 100.0
-        badge = ""
-        callout = f"<span style='color:#f87171;font-size:10px;font-weight:600;'>{rem_sl_pct:.2f}% to SL</span>"
-
-    return f"""
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
-        <span style="width:30px;color:#8b9eb0;font-size:11px;font-weight:700;">{label}</span>
-        <div style="flex:1;display:flex;align-items:center;position:relative;height:14px;">
-            <!-- Left Half (SL Zone) -->
-            <div style="width:50%;height:5px;background:#1e293b;border-radius:3px 0 0 3px;display:flex;justify-content:flex-end;overflow:hidden;">
-                <div style="width:{pct_left:.1f}%;height:100%;background:linear-gradient(90deg,#ef4444,#f87171);"></div>
-            </div>
-            <!-- Center Entry Pivot -->
-            <div style="width:2px;height:12px;background:#64748b;z-index:2;"></div>
-            <!-- Right Half (TP Zone) -->
-            <div style="width:50%;height:5px;background:#1e293b;border-radius:0 3px 3px 0;display:flex;justify-content:flex-start;overflow:hidden;">
-                <div style="width:{pct_right:.1f}%;height:100%;background:linear-gradient(90deg,#059669,#34d399);box-shadow:0 0 8px #10b981;"></div>
-            </div>
-        </div>
-        <div style="width:145px;text-align:right;white-space:nowrap;">{badge} {callout}</div>
-    </div>
+    Godzilla Dual-Horizon Quantitative Engine:
+    - Decoupled 1H Intraday and 4H Swing scanners (zero cross-timeframe blocking)
+    - Each timeframe combines Structural Momentum (EMA-8/21 + RSI) + Multi-Level L2 OBI + Rolling 60s CVD
+    - Independent Hysteresis Locks (25m on 1H, 90m on 4H) prevent LONG/SHORT flip-flopping
+    - Independent ATR-velocity ETAs for TP1, TP2, TP3 and Live Entry-Zone Drift Guard
     """
 
+    def __init__(
+        self,
+        decay_lambda: float = 0.35,
+        depth_levels: int = 20,
+        max_spread_phi: float = 0.0008,
+        imbalance_threshold: float = 0.22,
+        garch_k: float = 1.5,
+    ):
+        self.decay_lambda = decay_lambda
+        self.depth_levels = depth_levels
+        self.max_spread_phi = max_spread_phi
+        self.imbalance_threshold = imbalance_threshold
+        self.garch_k = garch_k
 
-# Header Bar
-pkt_tz = timezone(timedelta(hours=5))
-now_utc = datetime.now(timezone.utc)
-now_pkt = now_utc.astimezone(pkt_tz)
+        self.weights = self._compute_weights(decay_lambda, depth_levels)
 
-hdr_col1, hdr_col2, hdr_col3 = st.columns([3.2, 1.4, 1.4])
-with hdr_col1:
-    st.markdown("## 🦖 Godzilla")
-    st.caption(f"🕒 Server Clock: **{now_pkt.strftime('%H:%M:%S')} PKT** ({now_utc.strftime('%H:%M:%S')} UTC)")
+        self.trade_buffer: deque = deque(maxlen=20000)
+        self.audit_logbook: deque = deque(maxlen=50)
 
-with hdr_col2:
-    st.write("")
-    scanner_active = st.toggle("🟢 LIVE AUTO-SCANNER: ON", value=True)
+        self.garch_sigma: float = 0.0045
+        self.garch_last_fit: float = 0.0
 
-with hdr_col3:
-    st.write("")
-    auto_refresh = st.toggle("⚡ Real-Time Stream (500ms)", value=True)
+        # Independent Timeframe State (1H vs 4H)
+        self.auto_sr_levels: Dict[str, List[float]] = {"1H": [], "4H": []}
+        self.tf_bias: Dict[str, str] = {"1H": "CALIBRATING", "4H": "CALIBRATING"}
+        self.tf_rsi: Dict[str, float] = {"1H": 50.0, "4H": 50.0}
+        self.tf_atr: Dict[str, float] = {"1H": 0.0, "4H": 0.0}
 
-tab_student, tab_pro = st.tabs([
-    "🎯 Godzilla Institutional Signals (4H + 1H)",
-    "🔬 Godzilla Order Book & Audit Terminal"
-])
+        # Independent Signal Slots & Hysteresis Locks per Timeframe
+        self.signals_by_tf: Dict[str, List[CommittedSignal]] = {"1H": [], "4H": []}
+        self.status_by_tf: Dict[str, str] = {
+            "1H": "CALIBRATING 1H CANDLES...",
+            "4H": "CALIBRATING 4H CANDLES...",
+        }
+        self._locked_dir_by_tf: Dict[str, Optional[str]] = {"1H": None, "4H": None}
+        self._lock_ts_by_tf: Dict[str, float] = {"1H": 0.0, "4H": 0.0}
+        self._last_gen_by_tf: Dict[str, float] = {"1H": 0.0, "4H": 0.0}
 
-with tab_student:
-    ctrl_col1, ctrl_col2 = st.columns([2.2, 1.3])
-    with ctrl_col1:
-        selected_coin = st.radio(
-            "Select Asset to Scan",
-            ASSETS,
-            index=ASSETS.index(st.session_state.student_coin),
-            horizontal=True
-        )
-        st.session_state.student_coin = selected_coin
+    @staticmethod
+    def _compute_weights(decay_lambda: float, levels: int) -> np.ndarray:
+        k = np.arange(1, levels + 1, dtype=np.float64)
+        return np.exp(-decay_lambda * (k - 1))
 
-    with ctrl_col2:
-        student_balance = st.number_input(
-            "My Account Balance ($)",
-            min_value=10.0,
-            value=float(st.session_state.student_balance),
-            step=10.0,
-            format="%.2f"
-        )
-        st.session_state.student_balance = student_balance
+    def update_params(
+        self,
+        decay_lambda: float,
+        max_spread_phi: float,
+        imbalance_threshold: float,
+        garch_k: float,
+    ) -> None:
+        if abs(decay_lambda - self.decay_lambda) > 1e-6:
+            self.decay_lambda = decay_lambda
+            self.weights = self._compute_weights(decay_lambda, self.depth_levels)
+        self.max_spread_phi = max_spread_phi
+        self.imbalance_threshold = imbalance_threshold
+        self.garch_k = garch_k
 
-    manager.update_config(
-        active_symbol=st.session_state.student_coin,
-        scanner_active=scanner_active,
-        account_balance=25000.0,
-        student_balance=st.session_state.student_balance,
-        risk_pct=1.0,
-        decay_lambda=0.35,
-        imbalance_threshold=0.25,
-        max_spread_phi=0.0008,
-        garch_k=1.5,
-        structural_zones=[]
-    )
+    @staticmethod
+    def _compute_ema(arr: np.ndarray, period: int) -> float:
+        if len(arr) < period:
+            return float(np.mean(arr))
+        alpha = 2.0 / (period + 1.0)
+        ema = float(arr[0])
+        for val in arr[1:]:
+            ema = alpha * float(val) + (1.0 - alpha) * ema
+        return ema
 
-    @st.fragment(run_every=0.5 if auto_refresh else None)
-    def render_godzilla_dashboard():
-        coin = st.session_state.student_coin
-        snap = manager.get_snapshot(coin)
-        metrics = snap.get("metrics", {})
-        liq = snap.get("liq_stats", {})
-        candidates = snap.get("candidate_signals", [])
-        tickers = snap.get("coin_tickers", {})
-        tf_bias = snap.get("tf_bias", {})
-        regime_status = snap.get("regime_status", "CALIBRATING...")
-        active_trades = snap.get("active_trades", [])
+    @staticmethod
+    def _compute_rsi(closes: np.ndarray, period: int = 14) -> float:
+        if len(closes) < period + 1:
+            return 50.0
+        deltas = np.diff(closes[-(period + 15):])
+        gains = np.where(deltas > 0, deltas, 0.0)
+        losses = np.where(deltas < 0, -deltas, 0.0)
+        avg_gain = float(np.mean(gains[-period:]))
+        avg_loss = float(np.mean(losses[-period:]))
+        if avg_loss < 1e-12:
+            return 85.0
+        rs = avg_gain / avg_loss
+        return float(100.0 - (100.0 / (1.0 + rs)))
 
-        mid_price = metrics.get("mid_price", 0.0)
-        if mid_price <= 0.0 and coin in tickers:
-            mid_price = float(tickers[coin].get("price", 0.0))
+    def update_timeframe_structure(self, tf_label: str, ohlcv_rows: List[Tuple[float, float, float, float]]) -> None:
+        if tf_label not in ("1H", "4H") or len(ohlcv_rows) < 25:
+            return
 
-        imbalance = metrics.get("imbalance_t", 0.0)
-        garch_vol = metrics.get("garch_sigma", 0.0045)
+        highs = np.array([r[1] for r in ohlcv_rows], dtype=np.float64)
+        lows = np.array([r[2] for r in ohlcv_rows], dtype=np.float64)
+        closes = np.array([r[3] for r in ohlcv_rows], dtype=np.float64)
 
-        # Top Telemetry Row
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric(f"{coin} Live Price", fmt_px(mid_price))
-        m2.metric("HTF Regime (4H / 1H)", f"{tf_bias.get('4H', '—')} / {tf_bias.get('1H', '—')}")
-        m3.metric("L2 Imbalance / Vol", f"{imbalance:+.3f} | {garch_vol*100:.2f}%")
-        m4.metric("Stream Ticks", f"{snap.get('msg_count', 0):,}")
+        # True Range & 14-period ATR for this specific timeframe
+        if len(closes) >= 15:
+            prev_closes = closes[:-1]
+            tr = np.maximum(
+                highs[1:] - lows[1:],
+                np.maximum(np.abs(highs[1:] - prev_closes), np.abs(lows[1:] - prev_closes)),
+            )
+            self.tf_atr[tf_label] = float(np.mean(tr[-14:]))
 
-        st.markdown("---")
+        # Swing Pivot Detection
+        pivots = []
+        w = 3
+        for i in range(w, len(highs) - w):
+            if highs[i] == np.max(highs[i - w : i + w + 1]):
+                pivots.append(float(highs[i]))
+            if lows[i] == np.min(lows[i - w : i + w + 1]):
+                pivots.append(float(lows[i]))
 
-        # Liquidation & Structure Strip
-        st.subheader(f"🔥 Godzilla Liquidation Clusters ({coin})")
-        l1, l2, l3 = st.columns(3)
-        l1.metric(
-            "Long Liquidation Cluster",
-            fmt_px(liq.get("long_cluster", 0.0)),
-            f"${liq.get('long_usd', 0.0):,.0f} Est. Pool"
-        )
-        l2.metric(
-            "Short Liquidation Cluster",
-            fmt_px(liq.get("short_cluster", 0.0)),
-            f"${liq.get('short_usd', 0.0):,.0f} Est. Pool"
-        )
-        l3.metric("HTF Trend Alignment", liq.get("oi_bias", "Calibrating..."))
+        unique_levels: List[float] = []
+        for lvl in reversed(pivots):
+            if all(abs(lvl - existing) / max(existing, 1e-8) > 0.002 for existing in unique_levels):
+                unique_levels.append(lvl)
+            if len(unique_levels) >= 6:
+                break
+        self.auto_sr_levels[tf_label] = sorted(unique_levels)
 
-        st.markdown("---")
+        ema_fast = self._compute_ema(closes[-40:], 8)
+        ema_slow = self._compute_ema(closes[-60:], 21)
+        last_close = float(closes[-1])
+        rsi_val = self._compute_rsi(closes, 14)
+        self.tf_rsi[tf_label] = rsi_val
 
-        # Institutional Signal Scanner (With Entry Drift Gate & Individual TP ETAs)
-        st.subheader(f"📡 Godzilla Signal Scanner — {coin}")
-        if candidates:
-            for idx, sig in enumerate(candidates):
-                with st.container(border=True):
-                    r1, r2, r3 = st.columns([2.2, 2.2, 1.8])
-                    r1.markdown(f"### {sig.symbol} · **{sig.direction}**")
-                    r2.markdown(f"**Model:** {sig.timeframe}\n\n{sig.htf_summary}")
-                    r3.markdown(f"**Win Prob:** {sig.win_probability}% | **Lev:** {sig.leverage}x\n\n**Margin:** ${sig.margin_required_usd:,.2f}")
-
-                    # Entry Gate Status Banner
-                    if sig.can_enter:
-                        st.success(f"✅ **{sig.entry_status}** — Current Price: **{fmt_px(mid_price)}** vs Entry: **{fmt_px(sig.entry_price)}**")
-                    else:
-                        st.warning(f"⛔ **{sig.entry_status}** — Current Price: **{fmt_px(mid_price)}** vs Entry: **{fmt_px(sig.entry_price)}**")
-
-                    p1, p2, p3, p4, p5 = st.columns(5)
-                    p1.metric("Entry Zone", fmt_px(sig.entry_price))
-                    p2.metric("Shared SL", fmt_px(sig.stop_loss))
-                    p3.metric("TP 1", fmt_px(sig.tp1), sig.eta_tp1_str)
-                    p4.metric("TP 2", fmt_px(sig.tp2), sig.eta_tp2_str)
-                    p5.metric("TP 3", fmt_px(sig.tp3), sig.eta_tp3_str)
-
-                    st.caption(f"⚠️ {sig.risk_warning}")
-
-                    if sig.can_enter:
-                        if st.button(f"🔒 Commit Trade to Godzilla Cloud Tracker ({sig.symbol} {sig.direction})", key=f"commit_{sig.signal_id}_{idx}"):
-                            trade_record = {
-                                "trade_id": sig.signal_id,
-                                "symbol": sig.symbol,
-                                "direction": sig.direction,
-                                "timeframe": sig.timeframe,
-                                "entry_price": sig.entry_price,
-                                "stop_loss": sig.stop_loss,
-                                "tp1": sig.tp1,
-                                "tp2": sig.tp2,
-                                "tp3": sig.tp3,
-                                "leverage": sig.leverage,
-                                "margin_usd": sig.margin_required_usd,
-                                "eta_tp1": sig.eta_tp1_str,
-                                "eta_tp2": sig.eta_tp2_str,
-                                "eta_tp3": sig.eta_tp3_str,
-                                "committed_at": time.time(),
-                            }
-                            ok, msg = manager.commit_trade(trade_record)
-                            if ok:
-                                st.success(msg)
-                            else:
-                                st.error(msg)
-                    else:
-                        st.button(
-                            "🚫 Entry Passed — Waiting for Next Clean Setup",
-                            key=f"disabled_{sig.signal_id}_{idx}",
-                            disabled=True,
-                        )
+        # Decisive directional classification (no wide neutral dead-zone that blocks trades)
+        if ema_fast > ema_slow and last_close >= ema_slow * 0.9985:
+            self.tf_bias[tf_label] = "BULLISH"
+        elif ema_fast < ema_slow and last_close <= ema_slow * 1.0015:
+            self.tf_bias[tf_label] = "BEARISH"
         else:
-            st.info(f"🛡️ **Regime Filter Active:** {regime_status}")
+            self.tf_bias[tf_label] = "BULLISH" if last_close >= ema_fast else "BEARISH"
 
-        # ------------------------------------------------------------------
-        # PERSISTENT MULTI-COIN ACTIVE TRACKER (STICKS ACROSS ALL COIN TABS)
-        # ------------------------------------------------------------------
-        st.markdown("---")
-        st.subheader(f"📊 Godzilla Active Cloud Trades ({len(active_trades)} / 8 Locked)")
+    def fit_garch(self, close_prices: List[float]) -> float:
+        if len(close_prices) < 100:
+            return self.garch_sigma
+        try:
+            prices = np.asarray(close_prices, dtype=np.float64)
+            log_returns = 100.0 * np.diff(np.log(prices))
+            log_returns = log_returns[np.isfinite(log_returns)]
 
-        if not active_trades:
-            st.caption("No active trades locked in Godzilla Cloud yet. Commit a signal above to track it live across all tabs.")
+            model = arch_model(log_returns, mean="Zero", vol="GARCH", p=1, q=1, dist="t", rescale=False)
+            res = model.fit(disp="off", show_warning=False)
+            forecast = res.forecast(horizon=1, reindex=False)
+            variance_pct = float(forecast.variance.values[-1, 0])
+            sigma_decimal = np.sqrt(max(variance_pct, 1e-8)) / 100.0
+
+            self.garch_sigma = float(np.clip(sigma_decimal, 0.0005, 0.05))
+            self.garch_last_fit = time.time()
+        except Exception as exc:
+            logger.error(f"GARCH error: {exc}")
+        return self.garch_sigma
+
+    def ingest_trade(self, timestamp_sec: float, price: float, qty: float, is_buyer_maker: bool) -> None:
+        self.trade_buffer.append((timestamp_sec, price, qty, is_buyer_maker))
+
+    def compute_rolling_cvd(self, now: float, window_sec: float = 60.0) -> float:
+        cvd = 0.0
+        cutoff = now - window_sec
+        for ts, _, qty, is_buyer_maker in reversed(self.trade_buffer):
+            if ts < cutoff:
+                break
+            cvd += (-qty if is_buyer_maker else qty)
+        return cvd
+
+    def _refresh_signal_entry_gate(self, sig: CommittedSignal, mid_price: float) -> None:
+        tp1_dist = abs(sig.tp1 - sig.entry_price)
+        if tp1_dist <= 1e-9:
+            return
+
+        if sig.direction == "LONG":
+            drift = mid_price - sig.entry_price
+            if mid_price >= sig.tp1 or drift > tp1_dist * 0.35:
+                sig.entry_status = "TRADE PASSED — DO NOT CHASE (WAIT FOR NEXT SIGNAL)"
+                sig.can_enter = False
+            elif drift < -abs(sig.entry_price - sig.stop_loss) * 0.55:
+                sig.entry_status = "PULLBACK NEAR SL — WAIT FOR RECLAIM"
+                sig.can_enter = False
+            else:
+                sig.entry_status = "ENTER TRADE NOW (IN OPTIMAL ZONE)"
+                sig.can_enter = True
         else:
-            # Dark Institutional Table Header
-            st.markdown("""
-            <div class="gz-tracker-header">
-                <div style="display:grid;grid-template-columns:1.3fr 1.1fr 1.2fr 3.2fr 1.1fr 1.2fr 0.4fr;align-items:center;">
-                    <div>ASSET / PAIR</div>
-                    <div>CURRENT PRICE</div>
-                    <div>SHARED SL</div>
-                    <div>PROXIMITY BAR (SL-LEFT, TP-RIGHT)</div>
-                    <div>TP TARGET PRICE</div>
-                    <div>STATUS</div>
-                    <div style="text-align:center;">KILL</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            drift = sig.entry_price - mid_price
+            if mid_price <= sig.tp1 or drift > tp1_dist * 0.35:
+                sig.entry_status = "TRADE PASSED — DO NOT CHASE (WAIT FOR NEXT SIGNAL)"
+                sig.can_enter = False
+            elif drift < -abs(sig.stop_loss - sig.entry_price) * 0.55:
+                sig.entry_status = "BOUNCE NEAR SL — WAIT FOR REJECTION"
+                sig.can_enter = False
+            else:
+                sig.entry_status = "ENTER TRADE NOW (IN OPTIMAL ZONE)"
+                sig.can_enter = True
 
-            for tr in active_trades:
-                t_id = tr.get("trade_id", "")
-                t_sym = tr.get("symbol", "BTCUSDT")
-                t_dir = tr.get("direction", "LONG")
-                t_entry = float(tr.get("entry_price", 0.0))
-                t_sl = float(tr.get("stop_loss", 0.0))
-                t_tp1 = float(tr.get("tp1", 0.0))
-                t_tp2 = float(tr.get("tp2", 0.0))
-                t_tp3 = float(tr.get("tp3", 0.0))
+    def process_orderbook(
+        self,
+        timestamp_sec: float,
+        bids: List[Tuple[float, float]],
+        asks: List[Tuple[float, float]],
+        symbol: str,
+        account_balance: float,
+        risk_pct: float,
+        structural_zones: List[float],
+        scanner_active: bool = True,
+        student_balance: float = 100.0,
+    ) -> Dict:
+        if not bids or not asks:
+            return {}
 
-                # Live price for this specific coin from global tickers
-                live_px = float(tickers.get(t_sym, {}).get("price", 0.0))
-                if live_px <= 0:
-                    live_px = t_entry
+        bids = bids[: self.depth_levels]
+        asks = asks[: self.depth_levels]
+        best_bid = bids[0][0]
+        best_ask = asks[0][0]
+        mid_price = 0.5 * (best_bid + best_ask)
+        spread = max(best_ask - best_bid, 0.0)
+        phi_t = spread / mid_price if mid_price > 0 else 1.0
 
-                sl_pct = ((t_sl - t_entry) / max(t_entry, 1e-8)) * 100.0
-                icon_char, icon_color = COIN_BADGES.get(t_sym, ("◈", "#38bdf8"))
-                dir_color = "#34d399" if t_dir == "LONG" else "#f87171"
+        cvd_60s = self.compute_rolling_cvd(timestamp_sec, 60.0)
 
-                bar1 = build_proximity_bar_html("TP1", t_entry, live_px, t_sl, t_tp1, t_dir, tr.get("tp1_hit", False), tr.get("sl_hit", False))
-                bar2 = build_proximity_bar_html("TP2", t_entry, live_px, t_sl, t_tp2, t_dir, tr.get("tp2_hit", False), tr.get("sl_hit", False))
-                bar3 = build_proximity_bar_html("TP3", t_entry, live_px, t_sl, t_tp3, t_dir, tr.get("tp3_hit", False), tr.get("sl_hit", False))
+        n_b = min(len(bids), self.depth_levels)
+        n_a = min(len(asks), self.depth_levels)
+        w_bid = float(np.dot(self.weights[:n_b], [b[1] for b in bids[:n_b]]))
+        w_ask = float(np.dot(self.weights[:n_a], [a[1] for a in asks[:n_a]]))
+        denom = w_bid + w_ask
+        imbalance_t = float((w_bid - w_ask) / denom) if denom > 0 else 0.0
 
-                # Right-hand Status Pills for TP1, TP2, TP3
-                def status_pill(lbl: str, tp_val: float, hit: bool) -> str:
-                    if tr.get("sl_hit"):
-                        return f"<div class='gz-pill-red'>SL HIT</div>"
-                    if hit:
-                        return f"<div class='gz-pill-green'>{lbl} HIT</div>"
-                    tot = abs(tp_val - t_entry)
-                    prog = (live_px - t_entry) if t_dir == "LONG" else (t_entry - live_px)
-                    if prog >= 0:
-                        pct = min(99, int((prog / max(tot, 1e-8)) * 100))
-                        return f"<div class='gz-pill-green'>{pct}% to {lbl}</div>"
-                    sl_tot = abs(t_entry - t_sl)
-                    sl_p = min(99, int((abs(prog) / max(sl_tot, 1e-8)) * 100))
-                    return f"<div class='gz-pill-red'>{sl_p}% to SL</div>"
+        liq_stats = self._estimate_liquidation_clusters(mid_price, imbalance_t, w_bid, w_ask)
 
-                p1_pill = status_pill("TP1", t_tp1, tr.get("tp1_hit", False))
-                p2_pill = status_pill("TP2", t_tp2, tr.get("tp2_hit", False))
-                p3_pill = status_pill("TP3", t_tp3, tr.get("tp3_hit", False))
+        # Update live entry-zone drift gate for both 1H and 4H signals
+        for tf_key in ("1H", "4H"):
+            for existing_sig in self.signals_by_tf[tf_key]:
+                self._refresh_signal_entry_gate(existing_sig, mid_price)
 
-                row_cols = st.columns([9.1, 0.5])
-                with row_cols[0]:
-                    st.markdown(f"""
-                    <div class="gz-row-card">
-                        <div style="display:grid;grid-template-columns:1.35fr 1.15fr 1.25fr 3.35fr 1.15fr 1.15fr;align-items:center;gap:6px;">
-                            <div>
-                                <span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:6px;">{icon_char}</span>
-                                <strong style="font-size:14px;">{t_sym.replace('USDT','')}/USDT</strong><br/>
-                                <span style="color:{dir_color};font-size:11px;font-weight:700;margin-left:28px;">{t_dir} · Entry {fmt_px(t_entry)}</span>
-                            </div>
-                            <div style="font-size:15px;font-weight:700;color:#ffffff;">
-                                {fmt_px(live_px)}
-                            </div>
-                            <div style="font-size:13px;font-weight:600;color:#e2e8f0;">
-                                {fmt_px(t_sl)} <span style="color:#f87171;font-size:11px;">({sl_pct:+.2f}%)</span>
-                            </div>
-                            <div>
-                                {bar1}{bar2}{bar3}
-                            </div>
-                            <div style="font-size:12px;line-height:1.65;color:#cbd5e1;font-weight:600;">
-                                <div>{fmt_px(t_tp1)}</div>
-                                <div>{fmt_px(t_tp2)}</div>
-                                <div>{fmt_px(t_tp3)}</div>
-                            </div>
-                            <div style="line-height:1.4;">
-                                {p1_pill}<br/>{p2_pill}<br/>{p3_pill}
-                            </div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
+        if scanner_active:
+            # Run 1H and 4H scanners independently!
+            for tf_key in ("1H", "4H"):
+                self._evaluate_tf_signal(
+                    tf_key, timestamp_sec, symbol, mid_price, best_bid, best_ask, phi_t, imbalance_t, cvd_60s, student_balance
+                )
 
-                with row_cols[1]:
-                    st.write("")
-                    if st.button("✕", key=f"kill_{t_id}", help=f"Kill {t_sym} trade"):
-                        manager.kill_trade(t_id)
-                        st.rerun()
+        return {
+            "timestamp": timestamp_sec,
+            "mid_price": mid_price,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "spread": spread,
+            "phi_t": phi_t,
+            "imbalance_t": imbalance_t,
+            "cvd_15s": cvd_60s,
+            "garch_sigma": self.garch_sigma,
+            "tf_bias": dict(self.tf_bias),
+            "tf_rsi": dict(self.tf_rsi),
+            "tf_atr": dict(self.tf_atr),
+            "raw_bids": bids,
+            "raw_asks": asks,
+            "liq_stats": liq_stats,
+            "signals_1h": list(self.signals_by_tf["1H"]),
+            "signals_4h": list(self.signals_by_tf["4H"]),
+            "status_1h": self.status_by_tf["1H"],
+            "status_4h": self.status_by_tf["4H"],
+            "audit_logbook": list(self.audit_logbook),
+        }
 
-    render_godzilla_dashboard()
+    def _estimate_liquidation_clusters(self, mid: float, imb: float, w_b: float, w_a: float) -> Dict:
+        total_pool = (w_b + w_a) * mid * 0.15
+        return {
+            "long_cluster": mid * (1.0 - 0.012 - max(0, -imb * 0.005)),
+            "short_cluster": mid * (1.0 + 0.012 + max(0, imb * 0.005)),
+            "long_usd": max(total_pool * (0.5 - imb * 0.25), 2.5),
+            "short_usd": max(total_pool * (0.5 + imb * 0.25), 2.5),
+            "oi_bias": f"1H: {self.tf_bias['1H']} | 4H: {self.tf_bias['4H']}",
+        }
 
-with tab_pro:
-    st.subheader("🔬 Godzilla Microstructure & Audit Terminal")
-    p_col1, p_col2, p_col3, p_col4 = st.columns(4)
-    with p_col1:
-        pro_symbol = st.selectbox("Pro Asset", ASSETS, index=0)
-    with p_col2:
-        decay_lambda = st.slider("Decay Lambda (λ)", 0.05, 1.0, 0.35, 0.05)
-    with p_col3:
-        imbalance_threshold = st.slider("Imbalance Threshold", 0.10, 0.80, 0.25, 0.05)
-    with p_col4:
-        garch_k = st.slider("GARCH Multiplier (k)", 1.0, 3.0, 1.5, 0.1)
+    def compute_tf_position_sizing(self, tf_label: str, entry: float, balance: float, risk_pct: float, lev: int):
+        atr_val = self.tf_atr.get(tf_label, 0.0)
+        if tf_label == "1H":
+            sl_dist = max(atr_val * 0.70, self.garch_k * self.garch_sigma * entry, entry * 0.0035)
+        else:
+            sl_dist = max(atr_val * 0.85, self.garch_k * self.garch_sigma * entry * 1.8, entry * 0.0075)
 
-    max_spread_phi = st.number_input("Max Spread Filter (φ)", value=0.0008, format="%.5f")
+        risk_usd = balance * (risk_pct / 100.0)
+        units = risk_usd / sl_dist
+        notional = units * entry
+        max_notional = balance * lev * 0.80
+        if notional > max_notional:
+            notional = max_notional
+            units = notional / entry
+        margin = notional / lev
+        return sl_dist, units, notional, margin
 
-    manager.update_config(
-        active_symbol=pro_symbol,
-        scanner_active=scanner_active,
-        account_balance=25000.0,
-        student_balance=st.session_state.student_balance,
-        risk_pct=1.0,
-        decay_lambda=decay_lambda,
-        imbalance_threshold=imbalance_threshold,
-        max_spread_phi=max_spread_phi,
-        garch_k=garch_k,
-        structural_zones=[]
-    )
+    @staticmethod
+    def _format_eta(now_ts: float, hours_ahead: float, min_h: float, max_h: float) -> str:
+        clamped_hours = float(np.clip(hours_ahead, min_h, max_h))
+        target_ts = now_ts + (clamped_hours * 3600.0)
+        pkt_dt = datetime.fromtimestamp(target_ts + 18000, tz=timezone.utc)
+        utc_dt = datetime.fromtimestamp(target_ts, tz=timezone.utc)
+        return f"~{clamped_hours:.1f}h ({pkt_dt.strftime('%H:%M PKT')} / {utc_dt.strftime('%H:%M UTC')})"
 
-    pro_snap = manager.get_snapshot(pro_symbol)
-    pro_metrics = pro_snap.get("metrics", {})
+    def _evaluate_tf_signal(
+        self,
+        tf_label: str,
+        now: float,
+        symbol: str,
+        mid: float,
+        b_bid: float,
+        b_ask: float,
+        phi_t: float,
+        imb: float,
+        cvd_60s: float,
+        balance: float,
+    ) -> None:
+        bias = self.tf_bias.get(tf_label, "CALIBRATING")
+        rsi_val = self.tf_rsi.get(tf_label, 50.0)
+        atr_val = self.tf_atr.get(tf_label, 0.0)
 
-    pm1, pm2, pm3, pm4 = st.columns(4)
-    pm1.metric("Mid Price", fmt_px(pro_metrics.get("mid_price", 0.0)))
-    pm2.metric("Spread (φ)", f"{pro_metrics.get('phi_t', 0.0):.6f}")
-    pm3.metric("Weighted Imbalance", f"{pro_metrics.get('imbalance_t', 0.0):+.4f}")
-    pm4.metric("Connection Status", str(pro_snap.get("status", "ACTIVE")))
+        if bias == "CALIBRATING":
+            self.status_by_tf[tf_label] = f"CALIBRATING {tf_label} CANDLE STRUCTURE..."
+            return
 
-    ob_col1, ob_col2 = st.columns(2)
-    with ob_col1:
-        st.markdown("**Top Bids (Price, Size)**")
-        st.dataframe(pro_metrics.get("raw_bids", [])[:15], width="stretch")
-    with ob_col2:
-        st.markdown("**Top Asks (Price, Size)**")
-        st.dataframe(pro_metrics.get("raw_asks", [])[:15], width="stretch")
+        direction = "LONG" if bias == "BULLISH" else "SHORT"
+        cooldown_sec = 1500.0 if tf_label == "1H" else 5400.0  # 25m on 1H, 90m on 4H
 
-    st.markdown("**Godzilla Signal Audit Logbook**")
-    audit_logs = pro_snap.get("audit_logbook", [])
-    if audit_logs:
-        for entry in audit_logs:
-            st.text(entry)
-    else:
-        st.caption("No confirmed HTF signals logged yet.")
+        # 1. Per-Timeframe Directional Hysteresis Lock (prevents flip-flopping on that timeframe)
+        locked_dir = self._locked_dir_by_tf[tf_label]
+        lock_ts = self._lock_ts_by_tf[tf_label]
+        if locked_dir is not None and locked_dir != direction and (now - lock_ts) < cooldown_sec:
+            mins_left = int((cooldown_sec - (now - lock_ts)) / 60)
+            self.status_by_tf[tf_label] = f"{tf_label} LOCKED {locked_dir} ({mins_left}m hysteresis cooldown)"
+            return
+
+        # 2. RSI Exhaustion Filter
+        if direction == "LONG" and rsi_val > 74.0:
+            self.status_by_tf[tf_label] = f"{tf_label} BULLISH, BUT RSI OVERBOUGHT ({rsi_val:.1f}) — WAITING FOR PULLBACK"
+            return
+        if direction == "SHORT" and rsi_val < 26.0:
+            self.status_by_tf[tf_label] = f"{tf_label} BEARISH, BUT RSI OVERSOLD ({rsi_val:.1f}) — WAITING FOR BOUNCE"
+            return
+
+        # 3. Spread & Orderbook / CVD Flow Confirmation
+        if phi_t > self.max_spread_phi:
+            self.status_by_tf[tf_label] = f"{tf_label} SPREAD WIDE ({phi_t:.5f}) — FILTERED"
+            return
+
+        req_imb = max(self.imbalance_threshold, 0.18) if tf_label == "1H" else max(self.imbalance_threshold * 0.85, 0.15)
+        if direction == "LONG" and (imb < req_imb and cvd_60s <= 0):
+            self.status_by_tf[tf_label] = f"{tf_label} BULLISH BIAS — WAITING FOR BUY FLOW (L2 Imb: {imb:+.2f})"
+            return
+        if direction == "SHORT" and (imb > -req_imb and cvd_60s >= 0):
+            self.status_by_tf[tf_label] = f"{tf_label} BEARISH BIAS — WAITING FOR SELL FLOW (L2 Imb: {imb:+.2f})"
+            return
+
+        self.status_by_tf[tf_label] = f"ACTIVE {tf_label} {direction} SIGNAL ({tf_label} STRUCTURE + FLOW ALIGNED)"
+
+        # Keep existing valid signal active for 10m (1H) or 30m (4H) unless price passed entry
+        regen_window = 600.0 if tf_label == "1H" else 1800.0
+        existing = self.signals_by_tf[tf_label]
+        if existing and (now - self._last_gen_by_tf[tf_label]) < regen_window:
+            if existing[0].direction == direction and existing[0].can_enter:
+                return
+
+        entry = b_bid if direction == "LONG" else b_ask
+        lev = 30 if tf_label == "1H" else 15
+        sl_dist, units, notional, margin = self.compute_tf_position_sizing(tf_label, entry, balance, 1.0, lev)
+
+        if direction == "LONG":
+            sl = entry - sl_dist
+            tp1 = entry + sl_dist * 1.35
+            tp2 = entry + sl_dist * 2.30
+            tp3 = entry + sl_dist * 3.60
+        else:
+            sl = entry + sl_dist
+            tp1 = entry - sl_dist * 1.35
+            tp2 = entry - sl_dist * 2.30
+            tp3 = entry - sl_dist * 3.60
+
+        # Distinct Velocity & ETA horizons for 1H Intraday vs 4H Swing
+        if tf_label == "1H":
+            vel = max(atr_val * 0.50, mid * self.garch_sigma * 2.4, mid * 0.0025)
+            eta_tp1 = self._format_eta(now, abs(tp1 - entry) / vel, 0.5, 4.0)
+            eta_tp2 = self._format_eta(now, abs(tp2 - entry) / vel, 1.5, 8.0)
+            eta_tp3 = self._format_eta(now, abs(tp3 - entry) / vel, 3.0, 14.0)
+            tier = "1H INTRADAY MOMENTUM"
+        else:
+            vel = max((atr_val / 4.0) * 0.55, mid * self.garch_sigma * 2.0, mid * 0.0020)
+            eta_tp1 = self._format_eta(now, abs(tp1 - entry) / vel, 2.5, 12.0)
+            eta_tp2 = self._format_eta(now, abs(tp2 - entry) / vel, 6.0, 24.0)
+            eta_tp3 = self._format_eta(now, abs(tp3 - entry) / vel, 12.0, 42.0)
+            tier = "4H SWING STRUCTURE"
+
+        win_prob = min(84, int(67 + abs(imb) * 22))
+        sig_id = f"{symbol}_{tf_label}_{direction}_{int(now)}"
+
+        sig = CommittedSignal(
+            signal_id=sig_id,
+            timestamp=now,
+            symbol=symbol,
+            timeframe=tf_label,
+            risk_tier=tier,
+            direction=direction,
+            entry_price=entry,
+            stop_loss=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            position_size_units=units,
+            position_notional_usd=notional,
+            margin_required_usd=margin,
+            leverage=lev,
+            win_probability=win_prob,
+            eta_tp1_str=eta_tp1,
+            eta_tp2_str=eta_tp2,
+            eta_tp3_str=eta_tp3,
+            htf_summary=f"{tf_label} {bias} (RSI {rsi_val:.0f}) · L2 Imb {imb:+.2f} · 60s CVD {cvd_60s:+.1f}",
+            risk_warning=f"{tf_label} Isolated Margin · Shared SL · Trail SL to Entry at TP1",
+            entry_status="ENTER TRADE NOW (IN OPTIMAL ZONE)",
+            can_enter=True,
+            status="CANDIDATE_READY",
+        )
+
+        self.signals_by_tf[tf_label] = [sig]
+        self._locked_dir_by_tf[tf_label] = direction
+        self._lock_ts_by_tf[tf_label] = now
+        self._last_gen_by_tf[tf_label] = now
+        self.audit_logbook.appendleft(
+            f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC] [{tf_label}] {symbol} {direction} @ {entry:.4f} | RSI={rsi_val:.1f}, Imb={imb:+.2f}"
+        )
