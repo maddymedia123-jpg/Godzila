@@ -21,8 +21,8 @@ OKX_MAP = {
     "DOGEUSDT": "DOGE-USDT-SWAP",
 }
 REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
-PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v3"
-AUDIT_DB_KEY = "godzilla_audit_archive_v3"
+PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v4"
+AUDIT_DB_KEY = "godzilla_audit_archive_v4"
 MAX_ACTIVE_TRADES = 10
 
 
