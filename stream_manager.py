@@ -21,7 +21,8 @@ OKX_MAP = {
     "DOGEUSDT": "DOGE-USDT-SWAP",
 }
 REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
-PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v2"
+PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v3"
+AUDIT_DB_KEY = "godzilla_audit_archive_v3"
 MAX_ACTIVE_TRADES = 10
 
 
@@ -46,6 +47,7 @@ class BinanceFuturesStreamManager:
 
         self.db = None
         self.active_trades: List[Dict[str, Any]] = []
+        self.audit_archive: List[Dict[str, Any]] = []
         self._init_turso_db()
         self._load_portfolio_from_turso()
 
@@ -71,7 +73,7 @@ class BinanceFuturesStreamManager:
                 );
             """)
         except Exception as exc:
-            logger.error(f"Turso DB disabled (using in-memory portfolio): {exc}")
+            logger.error(f"Turso DB disabled: {exc}")
             self.db = None
 
     def _save_portfolio_to_turso(self):
@@ -82,6 +84,11 @@ class BinanceFuturesStreamManager:
             self.db.execute(
                 "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
                 (PORTFOLIO_DB_KEY, payload, time.time()),
+            )
+            audit_payload = json.dumps(self.audit_archive)
+            self.db.execute(
+                "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
+                (AUDIT_DB_KEY, audit_payload, time.time()),
             )
         except Exception as exc:
             logger.error(f"Failed to persist portfolio to Turso: {exc}")
@@ -96,6 +103,13 @@ class BinanceFuturesStreamManager:
                 loaded = json.loads(rows[0][0])
                 if isinstance(loaded, list):
                     self.active_trades = loaded
+
+            res_audit = self.db.execute("SELECT payload FROM global_trading_memory WHERE key = ?;", (AUDIT_DB_KEY,))
+            rows_audit = res_audit.rows
+            if rows_audit and rows_audit[0][0]:
+                loaded_audit = json.loads(rows_audit[0][0])
+                if isinstance(loaded_audit, list):
+                    self.audit_archive = loaded_audit
         except Exception as exc:
             logger.error(f"Failed to load portfolio from Turso: {exc}")
 
@@ -104,7 +118,6 @@ class BinanceFuturesStreamManager:
             if len(self.active_trades) >= MAX_ACTIVE_TRADES:
                 return False, f"Maximum {MAX_ACTIVE_TRADES} active trades reached. Kill an existing trade first."
 
-            # Allow independent 1H and 4H trades on the same coin, but prevent exact duplicate (symbol + timeframe + direction)
             for existing in self.active_trades:
                 if (
                     existing.get("symbol") == trade_payload.get("symbol")
@@ -119,6 +132,7 @@ class BinanceFuturesStreamManager:
             trade_payload.setdefault("tp3_hit", False)
             trade_payload.setdefault("sl_hit", False)
             self.active_trades.append(trade_payload)
+            self.audit_archive.insert(0, dict(trade_payload))
             self._save_portfolio_to_turso()
             return True, f"Committed [{trade_payload.get('timeframe')}] {trade_payload['symbol']} {trade_payload['direction']} to Godzilla Cloud Tracker."
 
@@ -213,10 +227,6 @@ class BinanceFuturesStreamManager:
                     "imbalance_t": st_data.get("imbalance_t", 0.0),
                 }
 
-            all_audit = []
-            for ce in self.engines.values():
-                all_audit.extend(list(getattr(ce, "audit_logbook", [])))
-
             return {
                 "symbol": sym,
                 "status": self._connection_status,
@@ -229,7 +239,7 @@ class BinanceFuturesStreamManager:
                 "tf_bias": dict(eng.tf_bias),
                 "tf_rsi": dict(eng.tf_rsi),
                 "active_trades": [dict(t) for t in self.active_trades],
-                "audit_logbook": all_audit[:25],
+                "audit_archive": [dict(a) for a in self.audit_archive],
                 "coin_tickers": coin_tickers,
                 "msg_count": self._msg_count,
             }
