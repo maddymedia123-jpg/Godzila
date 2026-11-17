@@ -32,6 +32,7 @@ class CommittedSignal:
     eta_tp2_str: str
     eta_tp3_str: str
     htf_summary: str
+    alignment_status: str
     risk_warning: str
     entry_status: str = "ENTER TRADE NOW (IN OPTIMAL ZONE)"
     can_enter: bool = True
@@ -60,10 +61,10 @@ class QuantEngine:
         self.garch_sigma: float = 0.0045
         self.garch_last_fit: float = 0.0
 
-        self.auto_sr_levels: Dict[str, List[float]] = {"1H": [], "4H": []}
-        self.tf_bias: Dict[str, str] = {"1H": "CALIBRATING", "4H": "CALIBRATING"}
-        self.tf_rsi: Dict[str, float] = {"1H": 50.0, "4H": 50.0}
-        self.tf_atr: Dict[str, float] = {"1H": 0.0, "4H": 0.0}
+        self.auto_sr_levels: Dict[str, List[float]] = {"1H": [], "4H": [], "1D": []}
+        self.tf_bias: Dict[str, str] = {"1H": "CALIBRATING", "4H": "CALIBRATING", "1D": "BULLISH"}
+        self.tf_rsi: Dict[str, float] = {"1H": 50.0, "4H": 50.0, "1D": 55.0}
+        self.tf_atr: Dict[str, float] = {"1H": 0.0, "4H": 0.0, "1D": 0.0}
 
         self.signals_by_tf: Dict[str, List[CommittedSignal]] = {"1H": [], "4H": []}
         self.status_by_tf: Dict[str, str] = {
@@ -118,36 +119,20 @@ class QuantEngine:
         return float(100.0 - (100.0 / (1.0 + rs)))
 
     def update_timeframe_structure(self, tf_label: str, ohlcv_rows: List[Tuple[float, float, float, float]]) -> None:
-        if tf_label not in ("1H", "4H") or len(ohlcv_rows) < 25:
+        if tf_label not in ("1H", "4H", "1D") or len(ohlcv_rows) < 25:
             return
 
         highs = np.array([r[1] for r in ohlcv_rows], dtype=np.float64)
         lows = np.array([r[2] for r in ohlcv_rows], dtype=np.float64)
         closes = np.array([r[3] for r in ohlcv_rows], dtype=np.float64)
 
-        if len(closes) >= 15:
+        if len(closes) >= 15 and tf_label != "1D":
             prev_closes = closes[:-1]
             tr = np.maximum(
                 highs[1:] - lows[1:],
                 np.maximum(np.abs(highs[1:] - prev_closes), np.abs(lows[1:] - prev_closes)),
             )
             self.tf_atr[tf_label] = float(np.mean(tr[-14:]))
-
-        pivots = []
-        w = 3
-        for i in range(w, len(highs) - w):
-            if highs[i] == np.max(highs[i - w : i + w + 1]):
-                pivots.append(float(highs[i]))
-            if lows[i] == np.min(lows[i - w : i + w + 1]):
-                pivots.append(float(lows[i]))
-
-        unique_levels: List[float] = []
-        for lvl in reversed(pivots):
-            if all(abs(lvl - existing) / max(existing, 1e-8) > 0.002 for existing in unique_levels):
-                unique_levels.append(lvl)
-            if len(unique_levels) >= 6:
-                break
-        self.auto_sr_levels[tf_label] = sorted(unique_levels)
 
         ema_fast = self._compute_ema(closes[-40:], 8)
         ema_slow = self._compute_ema(closes[-60:], 21)
@@ -259,7 +244,6 @@ class QuantEngine:
         for tf_key in ("1H", "4H"):
             for existing_sig in self.signals_by_tf[tf_key]:
                 self._refresh_signal_entry_gate(existing_sig, mid_price)
-                # If current signal expired or drifted past optimal zone, clear lock to allow new trade generation immediately
                 if not existing_sig.can_enter:
                     self._locked_dir_by_tf[tf_key] = None
                     self._lock_ts_by_tf[tf_key] = 0.0
@@ -386,6 +370,17 @@ class QuantEngine:
 
         self.status_by_tf[tf_label] = f"ACTIVE {tf_label} {direction} SIGNAL ({tf_label} STRUCTURE + FLOW ALIGNED)"
 
+        # Check Multi-Timeframe Alignment
+        h4_bias = self.tf_bias.get("4H", "BULLISH")
+        d1_bias = self.tf_bias.get("1D", "BULLISH")
+        
+        if tf_label == "1H":
+            is_aligned = (direction == "LONG" and h4_bias == "BULLISH") or (direction == "SHORT" and h4_bias == "BEARISH")
+            alignment_str = "1H & 4H ALIGNED" if is_aligned else "1H & 4H CONFLICTING"
+        else:
+            is_aligned = (direction == "LONG" and d1_bias == "BULLISH") or (direction == "SHORT" and d1_bias == "BEARISH")
+            alignment_str = "4H & 1D ALIGNED" if is_aligned else "4H & 1D CONFLICTING"
+
         regen_window = 120.0 if tf_label == "1H" else 300.0
         existing = self.signals_by_tf[tf_label]
         if existing and (now - self._last_gen_by_tf[tf_label]) < regen_window:
@@ -420,7 +415,7 @@ class QuantEngine:
             eta_tp3 = self._format_pkt_eta(now, abs(tp3 - entry) / vel, 12.0, 42.0)
             tier = "4H SWING STRUCTURE"
 
-        win_prob = min(84, int(67 + abs(imb) * 22))
+        win_prob = min(86, int(68 + abs(imb) * 20))
         sig_id = f"{symbol}_{tf_label}_{direction}_{int(now)}"
 
         sig = CommittedSignal(
@@ -443,7 +438,8 @@ class QuantEngine:
             eta_tp1_str=eta_tp1,
             eta_tp2_str=eta_tp2,
             eta_tp3_str=eta_tp3,
-            htf_summary=f"{tf_label} {bias} (RSI {rsi_val:.0f}) · L2 Imb {imb:+.2f} · 60s CVD {cvd_60s:+.1f}",
+            htf_summary=f"{tf_label} {bias} (RSI {rsi_val:.0f}) · L2 Imb {imb:+.2f} · CVD {cvd_60s:+.1f}",
+            alignment_status=alignment_str,
             risk_warning=f"{tf_label} Isolated Margin · Shared SL · Trail SL to Entry at TP1",
             entry_status="ENTER TRADE NOW (IN OPTIMAL ZONE)",
             can_enter=True,
@@ -455,5 +451,5 @@ class QuantEngine:
         self._lock_ts_by_tf[tf_label] = now
         self._last_gen_by_tf[tf_label] = now
         self.audit_logbook.appendleft(
-            f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC] [{tf_label}] {symbol} {direction} @ {entry:.4f} | RSI={rsi_val:.1f}, Imb={imb:+.2f}"
+            f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC] [{tf_label}] {symbol} {direction} @ {entry:.4f} | Alignment: {alignment_str}"
         )
