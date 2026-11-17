@@ -325,7 +325,7 @@ class QuantEngine:
         target_pkt_day = pkt_dt.day
 
         if target_pkt_day != now_pkt_day:
-            time_str = f"{pkt_dt.strftime('%a %H:%M PKT')}"
+            time_str = f"{pkt_dt.strftime('%a %H:%M PKT').upper()}"
         else:
             time_str = f"{pkt_dt.strftime('%H:%M PKT')}"
         return f"~{clamped_hours:.1f}h ({time_str})"
