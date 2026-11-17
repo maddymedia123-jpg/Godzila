@@ -21,8 +21,8 @@ OKX_MAP = {
     "DOGEUSDT": "DOGE-USDT-SWAP",
 }
 REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
-PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v5"
-AUDIT_DB_KEY = "godzilla_audit_archive_v5"
+PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v6"
+AUDIT_DB_KEY = "godzilla_audit_archive_v6"
 MAX_ACTIVE_TRADES = 10
 
 
@@ -148,8 +148,6 @@ class BinanceFuturesStreamManager:
         for t in self.active_trades:
             if t.get("symbol") != symbol:
                 continue
-            if t.get("sl_hit"):
-                continue
 
             direction = t.get("direction", "LONG")
             sl = float(t.get("stop_loss", 0.0))
@@ -157,11 +155,23 @@ class BinanceFuturesStreamManager:
             tp2 = float(t.get("tp2", 0.0))
             tp3 = float(t.get("tp3", 0.0))
 
-            if direction == "LONG":
-                if not t.get("sl_hit") and mid_price <= sl:
+            # Check Stop-Loss Hit
+            if not t.get("sl_hit"):
+                if (direction == "LONG" and mid_price <= sl) or (direction == "SHORT" and mid_price >= sl):
                     t["sl_hit"] = True
                     changed = True
+                    # Log SL Hit to audit archive
+                    audit_entry = dict(t)
+                    audit_entry["status_note"] = "STOP-LOSS HIT"
+                    self.audit_archive.insert(0, audit_entry)
                     continue
+
+            # If SL is hit, freeze TPs and live tracking
+            if t.get("sl_hit"):
+                continue
+
+            # Check Take-Profits
+            if direction == "LONG":
                 if not t.get("tp1_hit") and mid_price >= tp1:
                     t["tp1_hit"] = True
                     changed = True
@@ -172,10 +182,6 @@ class BinanceFuturesStreamManager:
                     t["tp3_hit"] = True
                     changed = True
             else:
-                if not t.get("sl_hit") and mid_price >= sl:
-                    t["sl_hit"] = True
-                    changed = True
-                    continue
                 if not t.get("tp1_hit") and mid_price <= tp1:
                     t["tp1_hit"] = True
                     changed = True
