@@ -15,27 +15,41 @@ st.markdown("""
     .block-container { padding-top: 1.4rem; padding-bottom: 2rem; }
     .stMetric {
         background-color: #f8f9fb;
-        padding: 10px 12px;
+        padding: 12px 14px;
         border-radius: 8px;
         border: 1px solid #e1e4e8;
     }
     .gz-tracker-header {
         background: linear-gradient(90deg, #0d151c 0%, #13202b 100%);
-        color: #8b9eb0;
-        font-size: 11px;
-        font-weight: 700;
+        color: #94a3b8;
+        font-size: 12px;
+        font-weight: 800;
         letter-spacing: 0.08em;
-        padding: 10px 14px;
+        padding: 12px 16px;
         border-radius: 8px 8px 0 0;
         border: 1px solid #223240;
-        margin-bottom: 4px;
+        margin-bottom: 6px;
     }
     .gz-row-container {
         background: linear-gradient(90deg, #0f1922 0%, #14222e 50%, #0f1922 100%);
         border: 1px solid #223240;
         border-radius: 8px;
-        padding: 10px 14px;
-        margin-bottom: 8px;
+        padding: 14px 16px;
+        margin-bottom: 10px;
+    }
+    .gz-progress-track {
+        background-color: #1e293b;
+        border-radius: 4px;
+        height: 8px;
+        width: 100%;
+        overflow: hidden;
+        margin: 4px 0 8px 0;
+        border: 1px solid #334155;
+    }
+    .gz-progress-fill-green {
+        background: linear-gradient(90deg, #059669, #34d399);
+        height: 100%;
+        box-shadow: 0 0 8px rgba(52, 211, 153, 0.4);
     }
     </style>
 """, unsafe_allow_html=True)
@@ -129,15 +143,14 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
         st.caption(f"No active {tab_prefix} trades locked in Godzilla Cloud yet.")
         return
 
-    # Header Row
     st.markdown("""
     <div class="gz-tracker-header">
-        <div style="display:grid;grid-template-columns:1.2fr 1.0fr 1.1fr 3.0fr 1.1fr 1.2fr 0.4fr;align-items:center;">
+        <div style="display:grid;grid-template-columns:1.2fr 1.0fr 1.1fr 3.2fr 1.3fr 1.2fr 0.4fr;align-items:center;">
             <div>ASSET / PAIR</div>
             <div>CURRENT PRICE</div>
             <div>SHARED SL</div>
             <div>PROXIMITY BAR (SL-LEFT, TP-RIGHT)</div>
-            <div>TP TARGET PRICE</div>
+            <div>TP TARGET & TIMELINE</div>
             <div>STATUS</div>
             <div style="text-align:center;">KILL</div>
         </div>
@@ -154,6 +167,9 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
         t_tp1 = float(tr.get("tp1", 0.0))
         t_tp2 = float(tr.get("tp2", 0.0))
         t_tp3 = float(tr.get("tp3", 0.0))
+        eta1 = tr.get("eta_tp1", "~1h")
+        eta2 = tr.get("eta_tp2", "~4h")
+        eta3 = tr.get("eta_tp3", "~8h")
 
         live_px = float(tickers.get(t_sym, {}).get("price", 0.0))
         if live_px <= 0:
@@ -164,7 +180,6 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
         dir_color = "#34d399" if t_dir == "LONG" else "#f87171"
         tf_badge_bg = "#1d4ed8" if t_tf == "1H" else "#7c3aed"
 
-        # Calculate progress values for TP1, TP2, TP3
         def get_progress_val(tp_val: float) -> float:
             if t_dir == "LONG":
                 dist = max(tp_val - t_entry, 1e-8)
@@ -172,58 +187,61 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
             else:
                 dist = max(t_entry - tp_val, 1e-8)
                 progress = t_entry - live_px
-            return float(min(1.0, max(0.0, progress / dist)))
+            return float(min(100.0, max(0.0, (progress / dist) * 100.0)))
 
-        p1_prog = get_progress_val(t_tp1)
-        p2_prog = get_progress_val(t_tp2)
-        p3_prog = get_progress_val(t_tp3)
+        p1_pct = get_progress_val(t_tp1)
+        p2_pct = get_progress_val(t_tp2)
+        p3_pct = get_progress_val(t_tp3)
 
         with st.container():
             st.markdown('<div class="gz-row-container">', unsafe_allow_html=True)
-            cols = st.columns([1.2, 1.0, 1.1, 3.0, 1.1, 1.2, 0.4])
+            cols = st.columns([1.2, 1.0, 1.1, 3.2, 1.3, 1.2, 0.4])
 
             with cols[0]:
                 st.markdown(f"""
-                <span style="display:inline-block;width:18px;height:18px;line-height:18px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:4px;font-size:10px;">{icon_char}</span>
-                <strong style="font-size:13px;color:#fff;">{t_sym.replace('USDT','')}/USDT</strong>
-                <span style="background:{tf_badge_bg};color:#fff;font-size:9px;font-weight:800;padding:1px 4px;border-radius:3px;margin-left:3px;">{t_tf}</span><br/>
-                <span style="color:{dir_color};font-size:11px;font-weight:700;margin-left:22px;">{t_dir} · {fmt_px(t_entry)}</span>
+                <span style="display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:6px;font-size:11px;">{icon_char}</span>
+                <strong style="font-size:14px;color:#fff;">{t_sym.replace('USDT','')}/USDT</strong>
+                <span style="background:{tf_badge_bg};color:#fff;font-size:10px;font-weight:800;padding:2px 5px;border-radius:3px;margin-left:4px;">{t_tf}</span><br/>
+                <span style="color:{dir_color};font-size:12px;font-weight:700;margin-left:26px;">{t_dir} · {fmt_px(t_entry)}</span>
                 """, unsafe_allow_html=True)
 
             with cols[1]:
-                st.markdown(f"<div style='font-size:14px;font-weight:700;color:#ffffff;padding-top:4px;'>{fmt_px(live_px)}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:15px;font-weight:700;color:#ffffff;padding-top:6px;'>{fmt_px(live_px)}</div>", unsafe_allow_html=True)
 
             with cols[2]:
-                st.markdown(f"<div style='font-size:12px;font-weight:600;color:#e2e8f0;padding-top:4px;'>{fmt_px(t_sl)}<br/><span style='color:#f87171;font-size:10px;'>({sl_pct:+.2f}%)</span></div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:13px;font-weight:600;color:#e2e8f0;padding-top:4px;'>{fmt_px(t_sl)}<br/><span style='color:#f87171;font-size:11px;'>({sl_pct:+.2f}%)</span></div>", unsafe_allow_html=True)
 
             with cols[3]:
-                st.markdown("<div style='font-size:10px;color:#8b9eb0;margin-bottom:-4px;'>TP1 / TP2 / TP3 Proximity</div>", unsafe_allow_html=True)
-                st.progress(p1_prog)
-                st.progress(p2_prog)
-                st.progress(p3_prog)
+                st.markdown(f"""
+                <div style="font-size:11px;color:#94a3b8;margin-bottom:2px;font-weight:700;">TP1 Progress: {p1_pct:.0f}%</div>
+                <div class="gz-progress-track"><div class="gz-progress-fill-green" style="width:{p1_pct}%;"></div></div>
+                <div style="font-size:11px;color:#94a3b8;margin-bottom:2px;font-weight:700;">TP2 Progress: {p2_pct:.0f}%</div>
+                <div class="gz-progress-track"><div class="gz-progress-fill-green" style="width:{p2_pct}%;"></div></div>
+                <div style="font-size:11px;color:#94a3b8;margin-bottom:2px;font-weight:700;">TP3 Progress: {p3_pct:.0f}%</div>
+                <div class="gz-progress-track"><div class="gz-progress-fill-green" style="width:{p3_pct}%;"></div></div>
+                """, unsafe_allow_html=True)
 
             with cols[4]:
                 st.markdown(f"""
-                <div style="font-size:11px;line-height:1.6;color:#cbd5e1;font-weight:600;padding-top:2px;">
-                    <div>{fmt_px(t_tp1)}</div>
-                    <div>{fmt_px(t_tp2)}</div>
-                    <div>{fmt_px(t_tp3)}</div>
+                <div style="font-size:11px;line-height:1.7;color:#e2e8f0;font-weight:600;padding-top:2px;">
+                    <div><strong>TP1:</strong> {fmt_px(t_tp1)}<br/><span style='color:#38bdf8;font-size:10px;'>🕒 {eta1}</span></div>
+                    <div><strong>TP2:</strong> {fmt_px(t_tp2)}<br/><span style='color:#38bdf8;font-size:10px;'>🕒 {eta2}</span></div>
+                    <div><strong>TP3:</strong> {fmt_px(t_tp3)}<br/><span style='color:#38bdf8;font-size:10px;'>🕒 {eta3}</span></div>
                 </div>
                 """, unsafe_allow_html=True)
 
             with cols[5]:
-                def status_badge(lbl: str, tp_val: float, hit: bool, prog: float) -> str:
+                def status_badge(lbl: str, tp_val: float, hit: bool, pct: float) -> str:
                     if tr.get("sl_hit"):
-                        return "<span style='color:#f87171;font-weight:700;font-size:11px;'>SL HIT</span>"
-                    if hit or prog >= 1.0:
-                        return f"<span style='color:#34d399;font-weight:700;font-size:11px;'>{lbl} HIT</span>"
-                    pct = int(prog * 100)
-                    return f"<span style='color:#34d399;font-weight:600;font-size:11px;'>{pct}% to {lbl}</span>"
+                        return "<span style='color:#ef4444;font-weight:800;font-size:11px;'>SL HIT</span>"
+                    if hit or pct >= 100.0:
+                        return f"<span style='color:#34d399;font-weight:800;font-size:11px;'>{lbl} HIT</span>"
+                    return f"<span style='color:#34d399;font-weight:600;font-size:11px;'>{pct:.0f}% to {lbl}</span>"
 
-                b1 = status_badge("TP1", t_tp1, tr.get("tp1_hit", False), p1_prog)
-                b2 = status_badge("TP2", t_tp2, tr.get("tp2_hit", False), p2_prog)
-                b3 = status_badge("TP3", t_tp3, tr.get("tp3_hit", False), p3_prog)
-                st.markdown(f"<div style='line-height:1.7;padding-top:2px;'>{b1}<br/>{b2}<br/>{b3}</div>", unsafe_allow_html=True)
+                b1 = status_badge("TP1", t_tp1, tr.get("tp1_hit", False), p1_pct)
+                b2 = status_badge("TP2", t_tp2, tr.get("tp2_hit", False), p2_pct)
+                b3 = status_badge("TP3", t_tp3, tr.get("tp3_hit", False), p3_pct)
+                st.markdown(f"<div style='line-height:1.9;padding-top:4px;'>{b1}<br/>{b2}<br/>{b3}</div>", unsafe_allow_html=True)
 
             with cols[6]:
                 st.write("")
@@ -305,6 +323,7 @@ with tab_student:
         status_1h = snap.get("status_1h", "CALIBRATING...")
         status_4h = snap.get("status_4h", "CALIBRATING...")
         active_trades = snap.get("active_trades", [])
+        audit_archive = snap.get("audit_archive", [])
 
         mid_price = metrics.get("mid_price", 0.0)
         if mid_price <= 0.0 and coin in tickers:
@@ -381,6 +400,24 @@ with tab_student:
         with act_tab_4h:
             render_active_trades_table(trades_4h, tickers, "4H")
 
+        # ------------------------------------------------------------------
+        # BACKTESTING & AUDIT LOGBOOK (COLLAPSIBLE ARCHIVE FOR 1D/1W/1M REVIEW)
+        # ------------------------------------------------------------------
+        st.markdown("---")
+        with st.expander(f"📚 Godzilla Backtest & Signal Audit Archive ({len(audit_archive)} Committed Signals)", expanded=False):
+            st.caption("Review historical backtested outcomes across 1-day, 1-week, and 1-month intervals to refine edge and win-rate assumptions.")
+            if audit_archive:
+                for idx, arch in enumerate(audit_archive):
+                    c_dt = datetime.fromtimestamp(arch.get("committed_at", time.time()), tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+                    st.markdown(f"""
+                    **#{idx+1} | {arch.get('symbol')} [{arch.get('timeframe')}] {arch.get('direction')}** — Committed at: *{c_dt}*
+                    * **Entry:** {fmt_px(arch.get('entry_price', 0))} | **Shared SL:** {fmt_px(arch.get('stop_loss', 0))}
+                    * **Targets:** TP1: {fmt_px(arch.get('tp1', 0))} ({arch.get('eta_tp1', '')}) | TP2: {fmt_px(arch.get('tp2', 0))} ({arch.get('eta_tp2', '')}) | TP3: {fmt_px(arch.get('tp3', 0))} ({arch.get('eta_tp3', '')})
+                    ---
+                    """)
+            else:
+                st.info("No audit history recorded yet. Commit signals from the scanner above to populate the backtest archive.")
+
     render_godzilla_dashboard()
 
 with tab_pro:
@@ -428,9 +465,9 @@ with tab_pro:
         st.dataframe(pro_metrics.get("raw_asks", [])[:15], width="stretch")
 
     st.markdown("**Godzilla Signal Audit Logbook**")
-    audit_logs = pro_snap.get("audit_logbook", [])
+    audit_logs = pro_snap.get("audit_archive", [])
     if audit_logs:
         for entry in audit_logs:
-            st.text(entry)
+            st.text(f"[{entry.get('symbol')} {entry.get('timeframe')}] {entry.get('direction')} @ {entry.get('entry_price')}")
     else:
-        st.caption("No confirmed 1H/4H signals logged yet.")
+        st.caption("No confirmed signals logged yet.")
