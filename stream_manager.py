@@ -21,6 +21,8 @@ OKX_MAP = {
     "DOGEUSDT": "DOGE-USDT-SWAP",
 }
 REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
+PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v1"
+MAX_ACTIVE_TRADES = 8
 
 
 class BinanceFuturesStreamManager:
@@ -34,7 +36,6 @@ class BinanceFuturesStreamManager:
         self._lock = threading.Lock()
         self._latest_states: Dict[str, Dict[str, Any]] = {sym: {} for sym in WATCHLIST_SYMBOLS}
         self._connection_status: str = "INITIALIZING"
-        self._venue: str = "OKX"
         self._msg_count: int = 0
 
         self.scanner_active: bool = True
@@ -44,7 +45,9 @@ class BinanceFuturesStreamManager:
         self.structural_zones: List[float] = []
 
         self.db = None
+        self.active_trades: List[Dict[str, Any]] = []
         self._init_turso_db()
+        self._load_portfolio_from_turso()
 
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run_background_loop, daemon=True)
@@ -68,33 +71,104 @@ class BinanceFuturesStreamManager:
                 );
             """)
         except Exception as exc:
-            logger.error(f"Turso DB disabled (using local session memory): {exc}")
+            logger.error(f"Turso DB disabled (using in-memory portfolio): {exc}")
             self.db = None
 
-    def save_state_to_turso(self, key: str, data: dict):
+    def _save_portfolio_to_turso(self):
         if not self.db:
             return
         try:
-            payload = json.dumps(data)
+            payload = json.dumps(self.active_trades)
             self.db.execute(
                 "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
-                (key, payload, time.time())
+                (PORTFOLIO_DB_KEY, payload, time.time()),
             )
         except Exception as exc:
-            logger.error(f"Failed to save to Turso: {exc}")
+            logger.error(f"Failed to persist portfolio to Turso: {exc}")
 
-    def load_state_from_turso(self, key: str) -> Optional[dict]:
+    def _load_portfolio_from_turso(self):
         if not self.db:
-            return None
+            return
         try:
-            res = self.db.execute("SELECT payload FROM global_trading_memory WHERE key = ?;", (key,))
+            res = self.db.execute("SELECT payload FROM global_trading_memory WHERE key = ?;", (PORTFOLIO_DB_KEY,))
             rows = res.rows
-            if rows:
-                return json.loads(rows[0][0])
+            if rows and rows[0][0]:
+                loaded = json.loads(rows[0][0])
+                if isinstance(loaded, list):
+                    self.active_trades = loaded
         except Exception as exc:
-            logger.error(f"Turso read failed, switching to local memory: {exc}")
-            self.db = None
-        return None
+            logger.error(f"Failed to load portfolio from Turso: {exc}")
+
+    def commit_trade(self, trade_payload: Dict[str, Any]) -> Tuple[bool, str]:
+        with self._lock:
+            if len(self.active_trades) >= MAX_ACTIVE_TRADES:
+                return False, f"Maximum {MAX_ACTIVE_TRADES} active trades reached. Kill an existing trade first."
+
+            # Prevent duplicate active trade on same symbol + direction
+            for existing in self.active_trades:
+                if existing.get("symbol") == trade_payload.get("symbol") and existing.get("direction") == trade_payload.get("direction"):
+                    return False, f"Active {trade_payload.get('direction')} trade already locked for {trade_payload.get('symbol')}."
+
+            trade_payload.setdefault("trade_id", f"{trade_payload['symbol']}_{int(time.time()*1000)}")
+            trade_payload.setdefault("tp1_hit", False)
+            trade_payload.setdefault("tp2_hit", False)
+            trade_payload.setdefault("tp3_hit", False)
+            trade_payload.setdefault("sl_hit", False)
+            self.active_trades.append(trade_payload)
+            self._save_portfolio_to_turso()
+            return True, f"Committed {trade_payload['symbol']} {trade_payload['direction']} to Godzilla Cloud Tracker."
+
+    def kill_trade(self, trade_id: str) -> None:
+        with self._lock:
+            self.active_trades = [t for t in self.active_trades if t.get("trade_id") != trade_id]
+            self._save_portfolio_to_turso()
+
+    def get_active_trades(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [dict(t) for t in self.active_trades]
+
+    def _update_active_trades_telemetry(self, symbol: str, mid_price: float) -> None:
+        if mid_price <= 0:
+            return
+        changed = False
+        for t in self.active_trades:
+            if t.get("symbol") != symbol:
+                continue
+            direction = t.get("direction", "LONG")
+            sl = float(t.get("stop_loss", 0.0))
+            tp1 = float(t.get("tp1", 0.0))
+            tp2 = float(t.get("tp2", 0.0))
+            tp3 = float(t.get("tp3", 0.0))
+
+            if direction == "LONG":
+                if not t.get("tp1_hit") and mid_price >= tp1:
+                    t["tp1_hit"] = True
+                    changed = True
+                if not t.get("tp2_hit") and mid_price >= tp2:
+                    t["tp2_hit"] = True
+                    changed = True
+                if not t.get("tp3_hit") and mid_price >= tp3:
+                    t["tp3_hit"] = True
+                    changed = True
+                if not t.get("sl_hit") and mid_price <= sl:
+                    t["sl_hit"] = True
+                    changed = True
+            else:
+                if not t.get("tp1_hit") and mid_price <= tp1:
+                    t["tp1_hit"] = True
+                    changed = True
+                if not t.get("tp2_hit") and mid_price <= tp2:
+                    t["tp2_hit"] = True
+                    changed = True
+                if not t.get("tp3_hit") and mid_price <= tp3:
+                    t["tp3_hit"] = True
+                    changed = True
+                if not t.get("sl_hit") and mid_price >= sl:
+                    t["sl_hit"] = True
+                    changed = True
+
+        if changed:
+            self._save_portfolio_to_turso()
 
     def update_config(
         self,
@@ -149,6 +223,10 @@ class BinanceFuturesStreamManager:
                 "metrics": latest,
                 "liq_stats": latest.get("liq_stats", {}),
                 "candidate_signals": list(getattr(eng, "candidate_signals", [])),
+                "regime_status": getattr(eng, "regime_status", "CALIBRATING..."),
+                "tf_bias": dict(getattr(eng, "tf_bias", {})),
+                "tf_rsi": dict(getattr(eng, "tf_rsi", {})),
+                "active_trades": [dict(t) for t in self.active_trades],
                 "audit_logbook": all_audit[:20],
                 "coin_tickers": coin_tickers,
                 "msg_count": self._msg_count,
@@ -160,11 +238,49 @@ class BinanceFuturesStreamManager:
         loop.run_until_complete(self._supervisor())
 
     async def _supervisor(self) -> None:
-        async def seed_and_kline_loop():
+        async def seed_and_htf_loop():
             async with aiohttp.ClientSession() as session:
                 while not self._stop_event.is_set():
                     for sym in WATCHLIST_SYMBOLS:
                         inst_id = OKX_MAP[sym]
+
+                        # 1. 4H & 1H Higher-Timeframe Structure Candles
+                        for bar_tf in ("4H", "1H"):
+                            try:
+                                async with session.get(
+                                    self.OKX_REST_CANDLES,
+                                    params={"instId": inst_id, "bar": bar_tf, "limit": "100"},
+                                    timeout=5,
+                                ) as resp:
+                                    if resp.status == 200:
+                                        payload = await resp.json()
+                                        rows = payload.get("data", [])
+                                        ohlcv = [
+                                            (float(r[1]), float(r[2]), float(r[3]), float(r[4]))
+                                            for r in reversed(rows)
+                                        ]
+                                        with self._lock:
+                                            self.engines[sym].update_timeframe_structure(bar_tf, ohlcv)
+                            except Exception:
+                                pass
+
+                        # 2. 15m Candles ONLY for GARCH Volatility Calibration
+                        try:
+                            async with session.get(
+                                self.OKX_REST_CANDLES,
+                                params={"instId": inst_id, "bar": "15m", "limit": "150"},
+                                timeout=5,
+                            ) as resp:
+                                if resp.status == 200:
+                                    payload = await resp.json()
+                                    rows = payload.get("data", [])
+                                    closes = [float(r[4]) for r in reversed(rows)]
+                                    with self._lock:
+                                        self.engines[sym].fit_garch(closes)
+                        except Exception:
+                            pass
+
+                        # 3. Initial REST Orderbook Seed
                         try:
                             async with session.get(
                                 self.OKX_REST_BOOKS,
@@ -193,25 +309,12 @@ class BinanceFuturesStreamManager:
                                             )
                                             if metrics:
                                                 self._latest_states[sym] = metrics
-                        except Exception as e:
-                            logger.error(f"OKX REST book seed error ({sym}): {e}")
-
-                        try:
-                            async with session.get(
-                                self.OKX_REST_CANDLES,
-                                params={"instId": inst_id, "bar": "15m", "limit": "200"},
-                                timeout=5,
-                            ) as resp:
-                                if resp.status == 200:
-                                    payload = await resp.json()
-                                    rows = payload.get("data", [])
-                                    closes = [float(r[4]) for r in reversed(rows)]
-                                    with self._lock:
-                                        self.engines[sym].fit_garch(closes)
+                                                self._update_active_trades_telemetry(sym, metrics["mid_price"])
                         except Exception:
                             pass
+
                         await asyncio.sleep(0.15)
-                    await asyncio.sleep(300)
+                    await asyncio.sleep(120)
 
         async def run_okx_ws() -> bool:
             async with websockets.connect(self.OKX_WS_PUBLIC, ping_interval=15, ping_timeout=10, open_timeout=8) as ws:
@@ -223,7 +326,6 @@ class BinanceFuturesStreamManager:
 
                 with self._lock:
                     self._connection_status = "LIVE OKX PERP"
-                    self._venue = "OKX"
 
                 while not self._stop_event.is_set():
                     raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
@@ -266,6 +368,7 @@ class BinanceFuturesStreamManager:
                                 )
                                 if metrics:
                                     self._latest_states[sym] = metrics
+                                    self._update_active_trades_telemetry(sym, metrics["mid_price"])
             return True
 
         async def ws_loop():
@@ -278,7 +381,7 @@ class BinanceFuturesStreamManager:
                     logger.error(f"OKX WS error ({exc}), retrying in 2s...")
                     await asyncio.sleep(2.0)
 
-        await asyncio.gather(seed_and_kline_loop(), ws_loop())
+        await asyncio.gather(seed_and_htf_loop(), ws_loop())
 
     def shutdown(self):
         self._stop_event.set()
