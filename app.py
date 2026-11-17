@@ -5,13 +5,13 @@ from stream_manager import BinanceFuturesStreamManager
 
 # 1. Page Configuration (Must be the very first Streamlit command)
 st.set_page_config(
-    page_title="Student State-Locked Signals & Coinglass Liquidation Terminal",
-    page_icon="⚡",
+    page_title="Godzilla — Institutional & Student Quantitative Terminal",
+    page_icon="🦖",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# Custom Styling for Clean Institutional & Student Terminal Look
+# Custom Styling
 st.markdown("""
     <style>
     .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
@@ -20,13 +20,6 @@ st.markdown("""
         padding: 14px;
         border-radius: 8px;
         border: 1px solid #e1e4e8;
-    }
-    .signal-card {
-        padding: 16px;
-        border-radius: 8px;
-        border: 1px solid #d0d7de;
-        background-color: #ffffff;
-        margin-bottom: 12px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -41,7 +34,7 @@ manager = get_stream_manager()
 # 3. Session State Initialization
 ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 if "student_coin" not in st.session_state:
-    st.session_state.student_coin = "SOLUSDT"
+    st.session_state.student_coin = "BTCUSDT"
 if "student_balance" not in st.session_state:
     st.session_state.student_balance = 100.00
 
@@ -52,7 +45,7 @@ now_pkt = now_utc.astimezone(pkt_tz)
 
 hdr_col1, hdr_col2, hdr_col3 = st.columns([3.2, 1.4, 1.4])
 with hdr_col1:
-    st.markdown("## ⚡ Student State-Locked Signals & Coinglass Liquidation Terminal")
+    st.markdown("## 🦖 Godzilla — Quantitative Signals & Liquidation Terminal")
     st.caption(f"🕒 Server Clock: **{now_pkt.strftime('%H:%M:%S')} PKT** ({now_utc.strftime('%H:%M:%S')} UTC)")
 
 with hdr_col2:
@@ -65,12 +58,12 @@ with hdr_col3:
 
 # 5. Main Navigation Tabs
 tab_student, tab_pro = st.tabs([
-    "🎯 Student State-Locked Signals (15m · 1H · 4H)",
-    "🔬 Pro Institutional Order Book Terminal"
+    "🎯 Godzilla Student State-Locked Signals (15m · 1H · 4H)",
+    "🔬 Godzilla Pro Order Book Terminal"
 ])
 
 # ---------------------------------------------------------
-# TAB 1: STUDENT STATE-LOCKED SIGNALS & LIQUIDATION TERMINAL
+# TAB 1: GODZILLA STUDENT STATE-LOCKED SIGNALS
 # ---------------------------------------------------------
 with tab_student:
     ctrl_col1, ctrl_col2 = st.columns([2.2, 1.3])
@@ -93,7 +86,6 @@ with tab_student:
         )
         st.session_state.student_balance = student_balance
 
-    # Push live config to background stream manager
     manager.update_config(
         active_symbol=st.session_state.student_coin,
         scanner_active=scanner_active,
@@ -114,22 +106,35 @@ with tab_student:
         metrics = snap.get("metrics", {})
         liq = snap.get("liq_stats", {})
         candidates = snap.get("candidate_signals", [])
+        tickers = snap.get("coin_tickers", {})
 
+        # Fallback to coin_tickers if orderbook mid_price hasn't populated yet
         mid_price = metrics.get("mid_price", 0.0)
+        if mid_price <= 0.0 and coin in tickers:
+            t_data = tickers[coin]
+            mid_price = float(t_data.get("price", 0.0) if isinstance(t_data, dict) else t_data)
+
         imbalance = metrics.get("imbalance_t", 0.0)
         garch_vol = metrics.get("garch_sigma", 0.0045)
 
         # Top Live Telemetry Strip
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric(f"{coin} Mark Price", f"${mid_price:,.4f}" if mid_price < 10 else f"${mid_price:,.2f}")
+        m1.metric(f"{coin} Mark Price", f"${mid_price:,.4f}" if 0 < mid_price < 10 else f"${mid_price:,.2f}")
         m2.metric("Orderbook Imbalance", f"{imbalance:+.3f}")
         m3.metric("GARCH Volatility (σ)", f"{garch_vol * 100:.3f}%")
         m4.metric("Stream Ticks", f"{snap.get('msg_count', 0):,}")
 
+        if mid_price == 0.0:
+            st.warning(
+                f"⚠️ Stream is active ({snap.get('msg_count', 0)} ticks), but {coin} price feed returned $0.00. "
+                "If Binance Futures is geo-blocked on Streamlit Cloud US servers, check `stream_manager.py` to ensure "
+                "Bybit/KuCoin or Binance Vision (`data-api.binance.vision`) fallback is active."
+            )
+
         st.markdown("---")
 
         # Coinglass Liquidation Cluster Section
-        st.subheader(f"🔥 Coinglass Liquidation Clusters & OI Bias ({coin})")
+        st.subheader(f"🔥 Godzilla Liquidation Clusters & OI Bias ({coin})")
         l1, l2, l3 = st.columns(3)
         l1.metric(
             "Long Liquidation Cluster",
@@ -146,10 +151,9 @@ with tab_student:
         st.markdown("---")
 
         # Candidate Signals & State-Locking (Turso Persistence)
-        st.subheader("📡 Live State-Locked Signal Scanner")
+        st.subheader("📡 Godzilla State-Locked Signal Scanner")
         if candidates:
             for idx, sig in enumerate(candidates):
-                # Support both dataclass objects and dicts safely
                 s_sym = getattr(sig, "symbol", coin)
                 s_dir = getattr(sig, "direction", "LONG")
                 s_tf = getattr(sig, "timeframe", "1H Intraday")
@@ -203,9 +207,9 @@ with tab_student:
         else:
             st.info(f"Scanning {coin} order book microstructure for ≥ 0.25 directional imbalance...")
 
-        # Active Locked Trade Viewer (Reads from Turso DB with session fallback)
+        # Active Locked Trade Viewer
         st.markdown("---")
-        st.subheader(f"💾 Active State-Locked Position ({coin})")
+        st.subheader(f"💾 Godzilla Active State-Locked Position ({coin})")
         locked_trade = None
         if hasattr(manager, "load_state_from_turso"):
             try:
@@ -228,10 +232,10 @@ with tab_student:
     render_student_dashboard()
 
 # ---------------------------------------------------------
-# TAB 2: PRO INSTITUTIONAL ORDER BOOK TERMINAL
+# TAB 2: GODZILLA PRO ORDER BOOK TERMINAL
 # ---------------------------------------------------------
 with tab_pro:
-    st.subheader("🔬 Institutional Microstructure & Hyperparameter Controls")
+    st.subheader("🔬 Godzilla Microstructure & Hyperparameter Controls")
     p_col1, p_col2, p_col3, p_col4 = st.columns(4)
     with p_col1:
         pro_symbol = st.selectbox("Pro Asset", ASSETS, index=0)
@@ -274,7 +278,7 @@ with tab_pro:
         st.markdown("**Top Asks (Price, Size)**")
         st.dataframe(pro_metrics.get("raw_asks", [])[:15], use_container_width=True)
 
-    st.markdown("**Audit Logbook**")
+    st.markdown("**Godzilla Audit Logbook**")
     audit_logs = pro_snap.get("audit_logbook", [])
     if audit_logs:
         st.write(audit_logs)
