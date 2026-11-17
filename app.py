@@ -431,9 +431,7 @@ with tab_student:
             else:
                 st.info(f"🌊 **4H Swing Engine:** {status_4h}")
 
-        # ------------------------------------------------------------------
-        # PERSISTENT ACTIVE CLOUD TRADES (SPLIT BY 1H & 4H + ALL VIEW)
-        # ------------------------------------------------------------------
+        # Persistent Active Cloud Trades
         st.markdown("---")
         trades_1h = [t for t in active_trades if t.get("timeframe") == "1H"]
         trades_4h = [t for t in active_trades if t.get("timeframe") == "4H"]
@@ -488,4 +486,22 @@ with tab_pro:
 
     pm1, pm2, pm3, pm4 = st.columns(4)
     pm1.metric("Mid Price", fmt_px(pro_metrics.get("mid_price", 0.0)))
-    pm2.metric("Spread (φ)", f"{pro_metrics.get('phi_t', 0.0
+    pm2.metric("Spread (φ)", f"{pro_metrics.get('phi_t', 0.0):.6f}")
+    pm3.metric("Weighted Imbalance", f"{pro_metrics.get('imbalance_t', 0.0):+.4f}")
+    pm4.metric("Connection Status", str(pro_snap.get("status", "ACTIVE")))
+
+    ob_col1, ob_col2 = st.columns(2)
+    with ob_col1:
+        st.markdown("**Top Bids (Price, Size)**")
+        st.dataframe(pro_metrics.get("raw_bids", [])[:15], width="stretch")
+    with ob_col2:
+        st.markdown("**Top Asks (Price, Size)**")
+        st.dataframe(pro_metrics.get("raw_asks", [])[:15], width="stretch")
+
+    st.markdown("**Godzilla Signal Audit Logbook**")
+    audit_logs = pro_snap.get("audit_logbook", [])
+    if audit_logs:
+        for entry in audit_logs:
+            st.text(entry)
+    else:
+        st.caption("No confirmed 1H/4H signals logged yet.")
