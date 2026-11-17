@@ -259,6 +259,10 @@ class QuantEngine:
         for tf_key in ("1H", "4H"):
             for existing_sig in self.signals_by_tf[tf_key]:
                 self._refresh_signal_entry_gate(existing_sig, mid_price)
+                # If current signal expired or drifted past optimal zone, clear lock to allow new trade generation immediately
+                if not existing_sig.can_enter:
+                    self._locked_dir_by_tf[tf_key] = None
+                    self._lock_ts_by_tf[tf_key] = 0.0
 
         if scanner_active:
             for tf_key in ("1H", "4H"):
@@ -352,7 +356,7 @@ class QuantEngine:
             return
 
         direction = "LONG" if bias == "BULLISH" else "SHORT"
-        cooldown_sec = 1500.0 if tf_label == "1H" else 5400.0
+        cooldown_sec = 60.0 if tf_label == "1H" else 120.0
 
         locked_dir = self._locked_dir_by_tf[tf_label]
         lock_ts = self._lock_ts_by_tf[tf_label]
@@ -361,10 +365,10 @@ class QuantEngine:
             self.status_by_tf[tf_label] = f"{tf_label} LOCKED {locked_dir} ({mins_left}m hysteresis cooldown)"
             return
 
-        if direction == "LONG" and rsi_val > 74.0:
+        if direction == "LONG" and rsi_val > 76.0:
             self.status_by_tf[tf_label] = f"{tf_label} BULLISH, BUT RSI OVERBOUGHT ({rsi_val:.1f}) — WAITING FOR PULLBACK"
             return
-        if direction == "SHORT" and rsi_val < 26.0:
+        if direction == "SHORT" and rsi_val < 24.0:
             self.status_by_tf[tf_label] = f"{tf_label} BEARISH, BUT RSI OVERSOLD ({rsi_val:.1f}) — WAITING FOR BOUNCE"
             return
 
@@ -372,7 +376,7 @@ class QuantEngine:
             self.status_by_tf[tf_label] = f"{tf_label} SPREAD WIDE ({phi_t:.5f}) — FILTERED"
             return
 
-        req_imb = max(self.imbalance_threshold, 0.18) if tf_label == "1H" else max(self.imbalance_threshold * 0.85, 0.15)
+        req_imb = max(self.imbalance_threshold, 0.15) if tf_label == "1H" else max(self.imbalance_threshold * 0.85, 0.12)
         if direction == "LONG" and (imb < req_imb and cvd_60s <= 0):
             self.status_by_tf[tf_label] = f"{tf_label} BULLISH BIAS — WAITING FOR BUY FLOW (L2 Imb: {imb:+.2f})"
             return
@@ -382,7 +386,7 @@ class QuantEngine:
 
         self.status_by_tf[tf_label] = f"ACTIVE {tf_label} {direction} SIGNAL ({tf_label} STRUCTURE + FLOW ALIGNED)"
 
-        regen_window = 600.0 if tf_label == "1H" else 1800.0
+        regen_window = 120.0 if tf_label == "1H" else 300.0
         existing = self.signals_by_tf[tf_label]
         if existing and (now - self._last_gen_by_tf[tf_label]) < regen_window:
             if existing[0].direction == direction and existing[0].can_enter:
