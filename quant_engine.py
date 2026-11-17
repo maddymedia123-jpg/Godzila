@@ -317,7 +317,7 @@ class QuantEngine:
         return sl_dist, units, notional, margin
 
     @staticmethod
-    def _format_eta(now_ts: float, hours_ahead: float, min_h: float, max_h: float) -> str:
+    def _format_pkt_eta(now_ts: float, hours_ahead: float, min_h: float, max_h: float) -> str:
         clamped_hours = float(np.clip(hours_ahead, min_h, max_h))
         target_ts = now_ts + (clamped_hours * 3600.0)
         pkt_dt = datetime.fromtimestamp(target_ts + 18000, tz=timezone.utc)
@@ -405,15 +405,15 @@ class QuantEngine:
 
         if tf_label == "1H":
             vel = max(atr_val * 0.50, mid * self.garch_sigma * 2.4, mid * 0.0025)
-            eta_tp1 = self._format_eta(now, abs(tp1 - entry) / vel, 0.5, 4.0)
-            eta_tp2 = self._format_eta(now, abs(tp2 - entry) / vel, 1.5, 8.0)
-            eta_tp3 = self._format_eta(now, abs(tp3 - entry) / vel, 3.0, 14.0)
+            eta_tp1 = self._format_pkt_eta(now, abs(tp1 - entry) / vel, 0.5, 4.0)
+            eta_tp2 = self._format_pkt_eta(now, abs(tp2 - entry) / vel, 1.5, 8.0)
+            eta_tp3 = self._format_pkt_eta(now, abs(tp3 - entry) / vel, 3.0, 14.0)
             tier = "1H INTRADAY MOMENTUM"
         else:
             vel = max((atr_val / 4.0) * 0.55, mid * self.garch_sigma * 2.0, mid * 0.0020)
-            eta_tp1 = self._format_eta(now, abs(tp1 - entry) / vel, 2.5, 12.0)
-            eta_tp2 = self._format_eta(now, abs(tp2 - entry) / vel, 6.0, 24.0)
-            eta_tp3 = self._format_eta(now, abs(tp3 - entry) / vel, 12.0, 42.0)
+            eta_tp1 = self._format_pkt_eta(now, abs(tp1 - entry) / vel, 2.5, 12.0)
+            eta_tp2 = self._format_pkt_eta(now, abs(tp2 - entry) / vel, 6.0, 24.0)
+            eta_tp3 = self._format_pkt_eta(now, abs(tp3 - entry) / vel, 12.0, 42.0)
             tier = "4H SWING STRUCTURE"
 
         win_prob = min(84, int(67 + abs(imb) * 22))
