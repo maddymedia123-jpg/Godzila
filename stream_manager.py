@@ -20,8 +20,8 @@ OKX_MAP = {
     "DOGEUSDT": "DOGE-USDT-SWAP",
 }
 REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
-PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v9"
-AUDIT_DB_KEY = "godzilla_audit_archive_v9"
+PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v10"
+AUDIT_DB_KEY = "godzilla_audit_archive_v10"
 MAX_ACTIVE_TRADES = 10
 
 
@@ -181,7 +181,6 @@ class BinanceFuturesStreamManager:
 
             self.active_trades.append(trade_payload)
 
-            # Promote or update matching entry in audit_archive
             updated_audit = False
             for idx, arch in enumerate(self.audit_archive):
                 if arch.get("trade_id") == trade_payload["trade_id"]:
@@ -265,7 +264,6 @@ class BinanceFuturesStreamManager:
                 if self._step_record_against_price(t, mid_price):
                     changed = True
 
-        # Follow every signal in audit_archive to its outcome (TP1/TP2/TP3/SL)
         for arch in self.audit_archive:
             if arch.get("symbol") == symbol:
                 if self._step_record_against_price(arch, mid_price):
