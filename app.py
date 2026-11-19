@@ -45,8 +45,24 @@ st.markdown("""
         color: #ffffff !important;
         font-weight: 900 !important;
     }
-    [data-testid="stMetricDelta"] > div {
+    [data-testid="stMetricDelta"] > div,
+    [data-testid="stMetricDelta"] span {
         color: #34d399 !important;
+        font-weight: 800 !important;
+        background-color: #0b1926 !important;
+        border-radius: 6px !important;
+        padding: 2px 8px !important;
+    }
+    div[data-testid="stAlert"] {
+        background-color: #141105 !important;
+        border: 1px solid #facc15 !important;
+        border-radius: 8px !important;
+    }
+    div[data-testid="stAlert"] p,
+    div[data-testid="stAlert"] li,
+    div[data-testid="stAlert"] div,
+    div[data-testid="stAlert"] strong {
+        color: #ffffff !important;
         font-weight: 800 !important;
     }
     .gz-dark-wrapper {
@@ -360,7 +376,6 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-# Header Bar (PKT Only)
 pkt_tz = timezone(timedelta(hours=5))
 now_pkt = datetime.now(timezone.utc).astimezone(pkt_tz)
 
