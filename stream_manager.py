@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime, timezone
 import json
 import logging
 import threading
@@ -9,7 +8,7 @@ import aiohttp
 import websockets
 import streamlit as st
 from libsql_client import create_client_sync
-from quant_engine import QuantEngine
+from quant_engine import QuantEngine, CommittedSignal
 
 logger = logging.getLogger("StreamManager")
 WATCHLIST_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
@@ -21,8 +20,8 @@ OKX_MAP = {
     "DOGEUSDT": "DOGE-USDT-SWAP",
 }
 REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
-PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v8"
-AUDIT_DB_KEY = "godzilla_audit_archive_v8"
+PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v9"
+AUDIT_DB_KEY = "godzilla_audit_archive_v9"
 MAX_ACTIVE_TRADES = 10
 
 
@@ -85,7 +84,7 @@ class BinanceFuturesStreamManager:
                 "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
                 (PORTFOLIO_DB_KEY, payload, time.time()),
             )
-            audit_payload = json.dumps(self.audit_archive)
+            audit_payload = json.dumps(self.audit_archive[:500])
             self.db.execute(
                 "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
                 (AUDIT_DB_KEY, audit_payload, time.time()),
@@ -113,16 +112,62 @@ class BinanceFuturesStreamManager:
         except Exception as exc:
             logger.error(f"Failed to load portfolio from Turso: {exc}")
 
+    @staticmethod
+    def _signal_to_record(sig: CommittedSignal, source_mode: str = "BOT_SIGNAL") -> Dict[str, Any]:
+        return {
+            "trade_id": sig.signal_id,
+            "symbol": sig.symbol,
+            "direction": sig.direction,
+            "timeframe": sig.timeframe,
+            "entry_price": sig.entry_price,
+            "stop_loss": sig.stop_loss,
+            "tp1": sig.tp1,
+            "tp2": sig.tp2,
+            "tp3": sig.tp3,
+            "leverage": sig.leverage,
+            "margin_usd": sig.margin_required_usd,
+            "eta_tp1": sig.eta_tp1_str,
+            "eta_tp2": sig.eta_tp2_str,
+            "eta_tp3": sig.eta_tp3_str,
+            "alignment_status": sig.alignment_status,
+            "accuracy_score": sig.accuracy_score,
+            "source_mode": source_mode,
+            "committed_at": sig.timestamp,
+            "tp1_hit": False,
+            "tp2_hit": False,
+            "tp3_hit": False,
+            "sl_hit": False,
+            "status_note": "ACTIVE (UNCOMMITTED SIGNAL)" if source_mode == "BOT_SIGNAL" else "COMMITTED ACTIVE",
+        }
+
+    def _auto_log_emitted_signals(self, eng: QuantEngine) -> None:
+        new_sigs = eng.drain_emitted_signals()
+        if not new_sigs:
+            return
+        added = False
+        existing_ids = {item.get("trade_id") for item in self.audit_archive}
+        for sig in new_sigs:
+            if sig.signal_id not in existing_ids:
+                rec = self._signal_to_record(sig, source_mode="BOT_SIGNAL")
+                self.audit_archive.insert(0, rec)
+                existing_ids.add(sig.signal_id)
+                added = True
+        if added:
+            self._save_portfolio_to_turso()
+
     def commit_trade(self, trade_payload: Dict[str, Any]) -> Tuple[bool, str]:
         with self._lock:
+            t_id = trade_payload.get("trade_id")
             if len(self.active_trades) >= MAX_ACTIVE_TRADES:
                 return False, f"Maximum {MAX_ACTIVE_TRADES} active trades reached. Kill an existing trade first."
 
             for existing in self.active_trades:
-                if (
+                if existing.get("trade_id") == t_id or (
                     existing.get("symbol") == trade_payload.get("symbol")
                     and existing.get("timeframe") == trade_payload.get("timeframe")
                     and existing.get("direction") == trade_payload.get("direction")
+                    and not existing.get("sl_hit")
+                    and not existing.get("tp3_hit")
                 ):
                     return False, f"Active {trade_payload.get('timeframe')} {trade_payload.get('direction')} trade already locked for {trade_payload.get('symbol')}."
 
@@ -131,72 +176,99 @@ class BinanceFuturesStreamManager:
             trade_payload.setdefault("tp2_hit", False)
             trade_payload.setdefault("tp3_hit", False)
             trade_payload.setdefault("sl_hit", False)
-            trade_payload.setdefault("status_note", "ACTIVE COMMITTED")
-            
+            trade_payload["source_mode"] = "COMMITTED"
+            trade_payload["status_note"] = "COMMITTED ACTIVE"
+
             self.active_trades.append(trade_payload)
-            self.audit_archive.insert(0, dict(trade_payload))
+
+            # Promote or update matching entry in audit_archive
+            updated_audit = False
+            for idx, arch in enumerate(self.audit_archive):
+                if arch.get("trade_id") == trade_payload["trade_id"]:
+                    merged = dict(arch)
+                    merged.update(trade_payload)
+                    self.audit_archive[idx] = merged
+                    updated_audit = True
+                    break
+            if not updated_audit:
+                self.audit_archive.insert(0, dict(trade_payload))
+
             self._save_portfolio_to_turso()
-            return True, f"Committed [{trade_payload.get('timeframe')}] {trade_payload['symbol']} {trade_payload['direction']} to Godzilla Cloud & Audit Logbook."
+            return True, f"Committed [{trade_payload.get('timeframe')}] {trade_payload['symbol']} {trade_payload['direction']} to Active Trades & Audit Logbook."
 
     def kill_trade(self, trade_id: str) -> None:
         with self._lock:
             self.active_trades = [t for t in self.active_trades if t.get("trade_id") != trade_id]
+            for arch in self.audit_archive:
+                if arch.get("trade_id") == trade_id and not arch.get("sl_hit") and not arch.get("tp3_hit"):
+                    arch["status_note"] = "KILLED / CLOSED BY USER"
             self._save_portfolio_to_turso()
+
+    @staticmethod
+    def _step_record_against_price(rec: Dict[str, Any], mid_price: float) -> bool:
+        if mid_price <= 0:
+            return False
+        if rec.get("sl_hit"):
+            return False
+
+        direction = rec.get("direction", "LONG")
+        sl = float(rec.get("stop_loss", 0.0))
+        tp1 = float(rec.get("tp1", 0.0))
+        tp2 = float(rec.get("tp2", 0.0))
+        tp3 = float(rec.get("tp3", 0.0))
+        changed = False
+
+        if (direction == "LONG" and mid_price <= sl) or (direction == "SHORT" and mid_price >= sl):
+            rec["sl_hit"] = True
+            rec["status_note"] = "STOP-LOSS HIT"
+            rec["closed_at"] = time.time()
+            return True
+
+        if direction == "LONG":
+            if not rec.get("tp1_hit") and mid_price >= tp1:
+                rec["tp1_hit"] = True
+                rec["status_note"] = "TP1 HIT"
+                changed = True
+            if not rec.get("tp2_hit") and mid_price >= tp2:
+                rec["tp2_hit"] = True
+                rec["status_note"] = "TP2 HIT"
+                changed = True
+            if not rec.get("tp3_hit") and mid_price >= tp3:
+                rec["tp3_hit"] = True
+                rec["status_note"] = "ALL TPs HIT"
+                rec["closed_at"] = time.time()
+                changed = True
+        else:
+            if not rec.get("tp1_hit") and mid_price <= tp1:
+                rec["tp1_hit"] = True
+                rec["status_note"] = "TP1 HIT"
+                changed = True
+            if not rec.get("tp2_hit") and mid_price <= tp2:
+                rec["tp2_hit"] = True
+                rec["status_note"] = "TP2 HIT"
+                changed = True
+            if not rec.get("tp3_hit") and mid_price <= tp3:
+                rec["tp3_hit"] = True
+                rec["status_note"] = "ALL TPs HIT"
+                rec["closed_at"] = time.time()
+                changed = True
+
+        return changed
 
     def _update_active_trades_telemetry(self, symbol: str, mid_price: float) -> None:
         if mid_price <= 0:
             return
         changed = False
+
         for t in self.active_trades:
-            if t.get("symbol") != symbol:
-                continue
+            if t.get("symbol") == symbol:
+                if self._step_record_against_price(t, mid_price):
+                    changed = True
 
-            direction = t.get("direction", "LONG")
-            sl = float(t.get("stop_loss", 0.0))
-            tp1 = float(t.get("tp1", 0.0))
-            tp2 = float(t.get("tp2", 0.0))
-            tp3 = float(t.get("tp3", 0.0))
-
-            # Check Stop-Loss Hit
-            if not t.get("sl_hit"):
-                if (direction == "LONG" and mid_price <= sl) or (direction == "SHORT" and mid_price >= sl):
-                    t["sl_hit"] = True
-                    t["status_note"] = "STOP-LOSS HIT"
-                    changed = True
-                    audit_entry = dict(t)
-                    if not any(a.get("trade_id") == t.get("trade_id") and a.get("status_note") == "STOP-LOSS HIT" for a in self.audit_archive):
-                        self.audit_archive.insert(0, audit_entry)
-                    continue
-
-            if t.get("sl_hit"):
-                continue
-
-            # Check Take-Profits
-            if direction == "LONG":
-                if not t.get("tp1_hit") and mid_price >= tp1:
-                    t["tp1_hit"] = True
-                    t["status_note"] = "TP1 HIT"
-                    changed = True
-                if not t.get("tp2_hit") and mid_price >= tp2:
-                    t["tp2_hit"] = True
-                    t["status_note"] = "TP2 HIT"
-                    changed = True
-                if not t.get("tp3_hit") and mid_price >= tp3:
-                    t["tp3_hit"] = True
-                    t["status_note"] = "ALL TPs HIT"
-                    changed = True
-            else:
-                if not t.get("tp1_hit") and mid_price <= tp1:
-                    t["tp1_hit"] = True
-                    t["status_note"] = "TP1 HIT"
-                    changed = True
-                if not t.get("tp2_hit") and mid_price <= tp2:
-                    t["tp2_hit"] = True
-                    t["status_note"] = "TP2 HIT"
-                    changed = True
-                if not t.get("tp3_hit") and mid_price <= tp3:
-                    t["tp3_hit"] = True
-                    t["status_note"] = "ALL TPs HIT"
+        # Follow every signal in audit_archive to its outcome (TP1/TP2/TP3/SL)
+        for arch in self.audit_archive:
+            if arch.get("symbol") == symbol:
+                if self._step_record_against_price(arch, mid_price):
                     changed = True
 
         if changed:
@@ -250,6 +322,7 @@ class BinanceFuturesStreamManager:
                 "status": self._connection_status,
                 "metrics": latest,
                 "liq_stats": latest.get("liq_stats", {}),
+                "prioritized_signals": latest.get("prioritized_signals", []),
                 "signals_1h": list(eng.signals_by_tf.get("1H", [])),
                 "signals_4h": list(eng.signals_by_tf.get("4H", [])),
                 "status_1h": eng.status_by_tf.get("1H", "CALIBRATING..."),
@@ -296,7 +369,7 @@ class BinanceFuturesStreamManager:
                         try:
                             async with session.get(
                                 self.OKX_REST_CANDLES,
-                                params={"instId": inst_id, "bar": "15m", "limit": "150"},
+                                params={"instId": inst_id, "bar": "1H", "limit": "150"},
                                 timeout=5,
                             ) as resp:
                                 if resp.status == 200:
@@ -336,6 +409,7 @@ class BinanceFuturesStreamManager:
                                             )
                                             if metrics:
                                                 self._latest_states[sym] = metrics
+                                                self._auto_log_emitted_signals(eng)
                                                 self._update_active_trades_telemetry(sym, metrics["mid_price"])
                         except Exception:
                             pass
@@ -395,6 +469,7 @@ class BinanceFuturesStreamManager:
                                 )
                                 if metrics:
                                     self._latest_states[sym] = metrics
+                                    self._auto_log_emitted_signals(eng)
                                     self._update_active_trades_telemetry(sym, metrics["mid_price"])
             return True
 
