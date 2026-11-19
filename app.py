@@ -12,77 +12,106 @@ st.set_page_config(
 
 st.markdown("""
     <style>
-    .block-container { padding-top: 1.4rem; padding-bottom: 2rem; background-color: #000000; color: #ffffff; }
-    .stMetric {
-        background-color: #090e13;
-        padding: 14px 16px;
-        border-radius: 8px;
-        border: 1px solid #1e293b;
+    .stApp, .block-container {
+        background-color: #000000 !important;
+        color: #ffffff !important;
+        padding-top: 1.2rem;
+        padding-bottom: 2rem;
+    }
+    h1, h2, h3, h4, h5, h6, p, span, div, label {
         color: #ffffff;
+    }
+    [data-testid="stWidgetLabel"] p,
+    [data-testid="stWidgetLabel"] label,
+    .stRadio label span,
+    .stCheckbox label span,
+    .stToggle label span {
+        color: #ffffff !important;
+        font-weight: 700 !important;
+    }
+    .stMetric {
+        background-color: #070c12 !important;
+        padding: 14px 16px !important;
+        border-radius: 8px !important;
+        border: 1px solid #1e3a5f !important;
+    }
+    [data-testid="stMetricLabel"] > div,
+    [data-testid="stMetricLabel"] p {
+        color: #38bdf8 !important;
+        font-weight: 800 !important;
+        font-size: 13px !important;
+    }
+    [data-testid="stMetricValue"] > div {
+        color: #ffffff !important;
+        font-weight: 900 !important;
+    }
+    [data-testid="stMetricDelta"] > div {
+        color: #34d399 !important;
+        font-weight: 800 !important;
     }
     .gz-dark-wrapper {
         background-color: #000000;
         color: #ffffff;
-        padding: 20px;
+        padding: 18px;
         border-radius: 12px;
-        border: 1px solid #1e293b;
+        border: 1px solid #1e3a5f;
         margin-top: 10px;
         margin-bottom: 20px;
     }
     .gz-tracker-header {
-        background: linear-gradient(90deg, #05080c 0%, #0d151c 100%);
+        background: linear-gradient(90deg, #07111a 0%, #0e1f2f 100%);
         color: #ffffff;
-        font-size: 14px;
-        font-weight: 800;
-        letter-spacing: 0.08em;
-        padding: 14px 18px;
+        font-size: 13px;
+        font-weight: 900;
+        letter-spacing: 0.06em;
+        padding: 14px 16px;
         border-radius: 8px 8px 0 0;
-        border: 1px solid #1e293b;
-        margin-bottom: 6px;
+        border: 1px solid #1e3a5f;
+        margin-bottom: 8px;
     }
     .gz-row-container {
-        background: linear-gradient(90deg, #070d12 0%, #0d1620 50%, #070d12 100%);
-        border: 1px solid #1e293b;
+        background: linear-gradient(90deg, #070e16 0%, #0c1824 50%, #070e16 100%);
+        border: 1px solid #1e3a5f;
         border-radius: 8px;
-        padding: 16px 18px;
+        padding: 16px;
         margin-bottom: 12px;
         color: #ffffff;
     }
     .gz-progress-track {
-        background-color: #16202b;
+        background-color: #132232;
         border-radius: 4px;
         height: 10px;
         width: 100%;
         overflow: hidden;
         margin: 6px 0 10px 0;
-        border: 1px solid #2b3a4a;
+        border: 1px solid #25415e;
     }
     .gz-progress-fill-green {
         background: linear-gradient(90deg, #059669, #34d399);
         height: 100%;
-        box-shadow: 0 0 10px rgba(52, 211, 153, 0.5);
     }
     .gz-progress-fill-red {
         background: linear-gradient(90deg, #dc2626, #f87171);
         height: 100%;
-        box-shadow: 0 0 10px rgba(248, 113, 113, 0.5);
     }
     </style>
 """, unsafe_allow_html=True)
+
 
 @st.cache_resource
 def get_stream_manager():
     return BinanceFuturesStreamManager(active_symbol="BTCUSDT")
 
+
 manager = get_stream_manager()
 
 ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 COIN_BADGES = {
-    "BTCUSDT": ("₿", "#f7931a"),
-    "ETHUSDT": ("Ξ", "#627eea"),
-    "SOLUSDT": ("◎", "#14f195"),
-    "XRPUSDT": ("✕", "#00aae4"),
-    "DOGEUSDT": ("Ð", "#c2a633"),
+    "BTCUSDT": ("₿", "#facc15"),
+    "ETHUSDT": ("Ξ", "#38bdf8"),
+    "SOLUSDT": ("◎", "#34d399"),
+    "XRPUSDT": ("✕", "#22d3ee"),
+    "DOGEUSDT": ("Ð", "#fbbf24"),
 }
 
 if "student_coin" not in st.session_state:
@@ -101,21 +130,37 @@ def fmt_px(val: float) -> str:
     return f"${val:,.2f}"
 
 
-def render_signal_card(sig, mid_price: float, tf_tag: str):
+def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int):
     is_long = sig.direction == "LONG"
     dir_color = "#34d399" if is_long else "#f87171"
-    align_color = "#34d399" if "ALIGNED" in sig.alignment_status else "#f87171"
+    rank_label = "PRIMARY PRIORITY SIGNAL (#1)" if rank_idx == 0 else f"SECONDARY QUALIFIED SIGNAL (#{rank_idx + 1})"
+    rank_color = "#facc15" if rank_idx == 0 else "#38bdf8"
 
     with st.container(border=True):
-        r1, r2, r3 = st.columns([2.2, 2.4, 1.6])
-        r1.markdown(f"### {sig.symbol} · <span style='color:{dir_color};'>{sig.direction}</span> `[{sig.timeframe}]`", unsafe_allow_html=True)
-        r2.markdown(f"**Strategy:** {sig.risk_tier}\n\n{sig.htf_summary}\n\n**Timeframe Check:** <span style='color:{align_color};font-weight:900;'>{sig.alignment_status}</span>", unsafe_allow_html=True)
-        r3.markdown(f"**Win Prob:** {sig.win_probability}% | **Lev:** {sig.leverage}x\n\n**Margin:** ${sig.margin_required_usd:,.2f}")
+        st.markdown(
+            f"<div style='color:{rank_color};font-weight:900;font-size:13px;letter-spacing:0.05em;margin-bottom:4px;'>★ {rank_label} · ACCURACY INDEX: {sig.accuracy_score:.1f}</div>",
+            unsafe_allow_html=True
+        )
+        r1, r2, r3 = st.columns([2.2, 2.6, 1.4])
+        r1.markdown(
+            f"### {sig.symbol} · <span style='color:{dir_color};'>{sig.direction}</span> · <span style='color:#facc15;'>[{sig.timeframe}]</span>",
+            unsafe_allow_html=True
+        )
+        r2.markdown(
+            f"<div style='color:#ffffff;font-weight:700;'><strong>Mode:</strong> {sig.risk_tier}</div>"
+            f"<div style='color:#ffffff;font-weight:700;margin-top:4px;'>{sig.htf_summary}</div>"
+            f"<div style='color:#34d399;font-weight:900;margin-top:4px;'>Alignment: {sig.alignment_status}</div>",
+            unsafe_allow_html=True
+        )
+        r3.markdown(
+            f"<div style='color:#ffffff;font-weight:800;'>Leverage: <span style='color:#facc15;'>{sig.leverage}x</span></div>"
+            f"<div style='color:#ffffff;font-weight:800;margin-top:4px;'>Margin: <span style='color:#38bdf8;'>${sig.margin_required_usd:,.2f}</span></div>",
+            unsafe_allow_html=True
+        )
 
-        if sig.can_enter:
-            st.success(f"✅ **{sig.entry_status}** — Current Price: **{fmt_px(mid_price)}** vs Entry: **{fmt_px(sig.entry_price)}**")
-        else:
-            st.warning(f"⛔ **{sig.entry_status}** — Current Price: **{fmt_px(mid_price)}** vs Entry: **{fmt_px(sig.entry_price)}**")
+        st.success(
+            f"✅ **{sig.entry_status}** — Current Price: **{fmt_px(mid_price)}** vs Entry: **{fmt_px(sig.entry_price)}**"
+        )
 
         p1, p2, p3, p4, p5 = st.columns(5)
         p1.metric("Entry Zone", fmt_px(sig.entry_price))
@@ -124,54 +169,55 @@ def render_signal_card(sig, mid_price: float, tf_tag: str):
         p4.metric("TP 2", fmt_px(sig.tp2), sig.eta_tp2_str)
         p5.metric("TP 3", fmt_px(sig.tp3), sig.eta_tp3_str)
 
-        st.caption(f"⚠️ {sig.risk_warning}")
+        st.markdown(f"<div style='color:#facc15;font-weight:700;margin-bottom:8px;'>⚠️ {sig.risk_warning}</div>", unsafe_allow_html=True)
 
-        if sig.can_enter:
-            if st.button(f"🔒 Commit {tf_tag} Trade to Godzilla Cloud & Audit Log ({sig.symbol} {sig.direction})", key=f"commit_{tf_tag}_{sig.signal_id}"):
-                trade_record = {
-                    "trade_id": sig.signal_id,
-                    "symbol": sig.symbol,
-                    "direction": sig.direction,
-                    "timeframe": tf_tag,
-                    "entry_price": sig.entry_price,
-                    "stop_loss": sig.stop_loss,
-                    "tp1": sig.tp1,
-                    "tp2": sig.tp2,
-                    "tp3": sig.tp3,
-                    "leverage": sig.leverage,
-                    "margin_usd": sig.margin_required_usd,
-                    "eta_tp1": sig.eta_tp1_str,
-                    "eta_tp2": sig.eta_tp2_str,
-                    "eta_tp3": sig.eta_tp3_str,
-                    "committed_at": time.time(),
-                }
-                ok, msg = manager.commit_trade(trade_record)
-                if ok:
-                    st.success(msg)
-                else:
-                    st.error(msg)
-        else:
-            st.button(
-                f"🚫 {tf_tag} Entry Passed — Waiting for Next Setup",
-                key=f"disabled_{tf_tag}_{sig.signal_id}",
-                disabled=True,
-            )
+        if st.button(
+            f"🔒 Lock [{sig.timeframe}] {sig.symbol} {sig.direction} into Active Trades",
+            key=f"commit_prio_{rank_idx}_{sig.signal_id}"
+        ):
+            trade_record = {
+                "trade_id": sig.signal_id,
+                "symbol": sig.symbol,
+                "direction": sig.direction,
+                "timeframe": sig.timeframe,
+                "entry_price": sig.entry_price,
+                "stop_loss": sig.stop_loss,
+                "tp1": sig.tp1,
+                "tp2": sig.tp2,
+                "tp3": sig.tp3,
+                "leverage": sig.leverage,
+                "margin_usd": sig.margin_required_usd,
+                "eta_tp1": sig.eta_tp1_str,
+                "eta_tp2": sig.eta_tp2_str,
+                "eta_tp3": sig.eta_tp3_str,
+                "alignment_status": sig.alignment_status,
+                "accuracy_score": sig.accuracy_score,
+                "committed_at": time.time(),
+            }
+            ok, msg = manager.commit_trade(trade_record)
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
 
 
 def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str):
     if not trades_list:
-        st.caption(f"No active {tab_prefix} trades locked in Godzilla Cloud yet.")
+        st.markdown(
+            f"<div style='color:#ffffff;font-weight:700;'>No active {tab_prefix} trades locked in Godzilla Cloud yet.</div>",
+            unsafe_allow_html=True
+        )
         return
 
     st.markdown('<div class="gz-dark-wrapper">', unsafe_allow_html=True)
     st.markdown("""
     <div class="gz-tracker-header">
-        <div style="display:grid;grid-template-columns:1.3fr 1.3fr 1.2fr 3.2fr 1.4fr 1.3fr 0.4fr;align-items:center;">
+        <div style="display:grid;grid-template-columns:1.3fr 1.3fr 1.2fr 3.2fr 1.4fr 1.3fr 0.4fr;align-items:center;color:#38bdf8;">
             <div>ASSET / PAIR</div>
             <div>LIVE vs ENTRY PRICE</div>
             <div>SHARED SL</div>
             <div>PROXIMITY BAR (SL-LEFT, TP-RIGHT)</div>
-            <div>TP TARGET & TIMELINE</div>
+            <div>TP TARGET & PKT TIME</div>
             <div>STATUS</div>
             <div style="text-align:center;">KILL</div>
         </div>
@@ -204,12 +250,12 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
         sl_pct = ((t_sl - t_entry) / max(t_entry, 1e-8)) * 100.0
         price_diff_pct = ((live_px - t_entry) / max(t_entry, 1e-8)) * 100.0
-        diff_color = "#34d399" if price_diff_pct >= 0 else "#f87171"
+        diff_color = "#34d399" if (price_diff_pct >= 0 if is_long else price_diff_pct <= 0) else "#f87171"
 
         icon_char, icon_color = COIN_BADGES.get(t_sym, ("◈", "#38bdf8"))
         dir_color = "#34d399" if is_long else "#f87171"
         fill_class = "gz-progress-fill-green" if is_long else "gz-progress-fill-red"
-        tf_badge_bg = "#1d4ed8" if t_tf == "1H" else "#7c3aed"
+        tf_badge_bg = "#2563eb" if t_tf == "1H" else "#7c3aed"
 
         def get_progress_val(tp_val: float, hit: bool) -> float:
             if hit or tp3_hit:
@@ -234,27 +280,32 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
             with cols[0]:
                 st.markdown(f"""
-                <span style="display:inline-block;width:24px;height:24px;line-height:24px;text-align:center;border-radius:50%;background:{icon_color};color:#0b1117;font-weight:900;margin-right:6px;font-size:13px;">{icon_char}</span>
+                <span style="display:inline-block;width:24px;height:24px;line-height:24px;text-align:center;border-radius:50%;background:{icon_color};color:#000000;font-weight:900;margin-right:6px;font-size:13px;">{icon_char}</span>
                 <strong style="font-size:16px;color:#ffffff;">{t_sym.replace('USDT','')}/USDT</strong>
-                <span style="background:{tf_badge_bg};color:#fff;font-size:11px;font-weight:800;padding:2px 6px;border-radius:3px;margin-left:4px;">{t_tf}</span><br/>
-                <span style="color:{dir_color};font-size:14px;font-weight:800;margin-left:30px;">{t_dir}</span>
+                <span style="background:{tf_badge_bg};color:#ffffff;font-size:11px;font-weight:900;padding:2px 6px;border-radius:3px;margin-left:4px;">{t_tf}</span><br/>
+                <span style="color:{dir_color};font-size:14px;font-weight:900;margin-left:30px;">{t_dir}</span>
                 """, unsafe_allow_html=True)
 
             with cols[1]:
                 st.markdown(f"""
-                <div style='font-size:16px;font-weight:900;color:#ffffff;'>Live: {fmt_px(live_px)}</div>
-                <div style='font-size:13px;font-weight:800;color:#ffffff;'>Entry: {fmt_px(t_entry)}</div>
-                <div style='font-size:13px;font-weight:800;color:{diff_color};'>({price_diff_pct:+.2f}%)</div>
+                <div style='font-size:15px;font-weight:900;color:#ffffff;'>Live: {fmt_px(live_px)}</div>
+                <div style='font-size:13px;font-weight:800;color:#38bdf8;'>Entry: {fmt_px(t_entry)}</div>
+                <div style='font-size:13px;font-weight:900;color:{diff_color};'>({price_diff_pct:+.2f}%)</div>
                 """, unsafe_allow_html=True)
 
             with cols[2]:
-                st.markdown(f"<div style='font-size:15px;font-weight:700;color:#ffffff;padding-top:4px;'>{fmt_px(t_sl)}<br/><span style='color:#f87171;font-size:13px;font-weight:700;'>({sl_pct:+.2f}%)</span></div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div style='font-size:15px;font-weight:800;color:#ffffff;padding-top:4px;'>{fmt_px(t_sl)}<br/>"
+                    f"<span style='color:#f87171;font-size:13px;font-weight:800;'>({sl_pct:+.2f}%)</span></div>",
+                    unsafe_allow_html=True
+                )
 
             with cols[3]:
                 if sl_hit:
-                    st.markdown("""
-                    <div style="font-size:13px;color:#ef4444;font-weight:800;padding:12px 0;text-align:center;">STOP-LOSS HIT — MONITORING FROZEN</div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(
+                        "<div style='font-size:13px;color:#f87171;font-weight:900;padding:12px 0;text-align:center;'>STOP-LOSS HIT — MONITORING FROZEN</div>",
+                        unsafe_allow_html=True
+                    )
                 else:
                     st.markdown(f"""
                     <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#ffffff;margin-bottom:2px;font-weight:800;">
@@ -273,29 +324,29 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
             with cols[4]:
                 if sl_hit:
-                    st.markdown("<div style='font-size:13px;color:#ffffff;font-weight:700;padding-top:14px;'>Target tracking halted at SL.</div>", unsafe_allow_html=True)
+                    st.markdown("<div style='font-size:13px;color:#f87171;font-weight:800;padding-top:14px;'>Halted at SL.</div>", unsafe_allow_html=True)
                 else:
                     st.markdown(f"""
-                    <div style="font-size:13px;line-height:1.7;color:#ffffff;font-weight:700;padding-top:2px;">
-                        <div><span style="color:#ffffff;">TP1:</span> <strong style="color:#ffffff;">{fmt_px(t_tp1)}</strong><br/><span style='color:#38bdf8;font-size:12px;font-weight:700;'>🕒 {eta1}</span></div>
-                        <div><span style="color:#ffffff;">TP2:</span> <strong style="color:#ffffff;">{fmt_px(t_tp2)}</strong><br/><span style='color:#38bdf8;font-size:12px;font-weight:700;'>🕒 {eta2}</span></div>
-                        <div><span style="color:#ffffff;">TP3:</span> <strong style="color:#ffffff;">{fmt_px(t_tp3)}</strong><br/><span style='color:#38bdf8;font-size:12px;font-weight:700;'>🕒 {eta3}</span></div>
+                    <div style="font-size:13px;line-height:1.7;color:#ffffff;font-weight:800;padding-top:2px;">
+                        <div>TP1: <strong>{fmt_px(t_tp1)}</strong><br/><span style='color:#38bdf8;font-size:12px;'>🕒 {eta1}</span></div>
+                        <div>TP2: <strong>{fmt_px(t_tp2)}</strong><br/><span style='color:#38bdf8;font-size:12px;'>🕒 {eta2}</span></div>
+                        <div>TP3: <strong>{fmt_px(t_tp3)}</strong><br/><span style='color:#38bdf8;font-size:12px;'>🕒 {eta3}</span></div>
                     </div>
                     """, unsafe_allow_html=True)
 
             with cols[5]:
-                def status_badge(lbl: str, tp_val: float, hit: bool, pct: float) -> str:
+                def status_badge(lbl: str, hit: bool, pct: float) -> str:
                     if sl_hit:
-                        return "<span style='color:#ef4444;font-weight:900;font-size:13px;'>SL HIT</span>"
+                        return "<span style='color:#f87171;font-weight:900;font-size:13px;'>SL HIT</span>"
                     if tp3_hit and lbl == "TP3":
                         return "<span style='color:#34d399;font-weight:900;font-size:13px;'>ALL TPs HIT</span>"
                     if hit or pct >= 100.0:
                         return f"<span style='color:#34d399;font-weight:900;font-size:13px;'>{lbl} HIT</span>"
-                    return f"<span style='color:#34d399;font-weight:700;font-size:13px;'>{pct:.0f}% to {lbl}</span>"
+                    return f"<span style='color:#38bdf8;font-weight:800;font-size:13px;'>{pct:.0f}% to {lbl}</span>"
 
-                b1 = status_badge("TP1", t_tp1, tp1_hit, p1_pct)
-                b2 = status_badge("TP2", t_tp2, tp2_hit, p2_pct)
-                b3 = status_badge("TP3", t_tp3, tp3_hit, p3_pct)
+                b1 = status_badge("TP1", tp1_hit, p1_pct)
+                b2 = status_badge("TP2", tp2_hit, p2_pct)
+                b3 = status_badge("TP3", tp3_hit, p3_pct)
                 st.markdown(f"<div style='line-height:2.0;padding-top:4px;'>{b1}<br/>{b2}<br/>{b3}</div>", unsafe_allow_html=True)
 
             with cols[6]:
@@ -309,15 +360,17 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-# Header Bar
+# Header Bar (PKT Only)
 pkt_tz = timezone(timedelta(hours=5))
-now_utc = datetime.now(timezone.utc)
-now_pkt = now_utc.astimezone(pkt_tz)
+now_pkt = datetime.now(timezone.utc).astimezone(pkt_tz)
 
 hdr_col1, hdr_col2, hdr_col3 = st.columns([3.2, 1.4, 1.4])
 with hdr_col1:
     st.markdown("## 🦖 Godzilla")
-    st.caption(f"🕒 Server Clock: **{now_pkt.strftime('%H:%M:%S')} PKT**")
+    st.markdown(
+        f"<div style='color:#ffffff;font-weight:800;'>🕒 Server Clock: <span style='color:#facc15;'>{now_pkt.strftime('%H:%M:%S')} PKT</span> · Testing Mode: <span style='color:#34d399;'>1H & 4H ONLY</span></div>",
+        unsafe_allow_html=True
+    )
 
 with hdr_col2:
     st.write("")
@@ -328,7 +381,7 @@ with hdr_col3:
     auto_refresh = st.toggle("⚡ Real-Time Stream (500ms)", value=True)
 
 tab_student, tab_pro = st.tabs([
-    "🎯 Godzilla Dual-Timeframe Terminal (1H · 4H)",
+    "🎯 Godzilla Prioritized Signal Terminal (1H · 4H)",
     "🔬 Godzilla Order Book & Audit Terminal"
 ])
 
@@ -360,9 +413,9 @@ with tab_student:
         student_balance=st.session_state.student_balance,
         risk_pct=1.0,
         decay_lambda=0.35,
-        imbalance_threshold=0.22,
+        imbalance_threshold=0.25,
         max_spread_phi=0.0008,
-        garch_k=1.5,
+        garch_k=1.8,
         structural_zones=[]
     )
 
@@ -375,8 +428,7 @@ with tab_student:
         tickers = snap.get("coin_tickers", {})
         tf_bias = snap.get("tf_bias", {})
         tf_rsi = snap.get("tf_rsi", {})
-        signals_1h = snap.get("signals_1h", [])
-        signals_4h = snap.get("signals_4h", [])
+        prioritized_signals = snap.get("prioritized_signals", [])
         status_1h = snap.get("status_1h", "CALIBRATING...")
         status_4h = snap.get("status_4h", "CALIBRATING...")
         active_trades = snap.get("active_trades", [])
@@ -391,7 +443,7 @@ with tab_student:
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric(f"{coin} Live Price", fmt_px(mid_price))
-        m2.metric("1H / 4H Structure", f"1H: {tf_bias.get('1H', '—')} | 4H: {tf_bias.get('4H', '—')}")
+        m2.metric("1H / 4H / 1D Bias", f"{tf_bias.get('1H', '—')} / {tf_bias.get('4H', '—')} / {tf_bias.get('1D', '—')}")
         m3.metric("L2 Imbalance / Vol", f"{imbalance:+.3f} | {garch_vol*100:.2f}%")
         m4.metric("Stream Ticks", f"{snap.get('msg_count', 0):,}")
 
@@ -413,25 +465,16 @@ with tab_student:
 
         st.markdown("---")
 
-        st.subheader(f"📡 Godzilla Signal Scanner — {coin}")
-        scan_tab_1h, scan_tab_4h = st.tabs([
-            f"⚡ 1H Intraday Scanner ({len(signals_1h)})",
-            f"🌊 4H Swing Scanner ({len(signals_4h)})"
-        ])
-
-        with scan_tab_1h:
-            if signals_1h:
-                for sig in signals_1h:
-                    render_signal_card(sig, mid_price, "1H")
-            else:
-                st.info(f"⚡ **1H Intraday Engine:** {status_1h}")
-
-        with scan_tab_4h:
-            if signals_4h:
-                for sig in signals_4h:
-                    render_signal_card(sig, mid_price, "4H")
-            else:
-                st.info(f"🌊 **4H Swing Engine:** {status_4h}")
+        st.subheader(f"📡 Godzilla High-Accuracy Signal Queue — {coin}")
+        if prioritized_signals:
+            for idx, sig in enumerate(prioritized_signals):
+                render_prioritized_signal_card(sig, mid_price, idx)
+        else:
+            st.warning(
+                f"⏸️ **NO QUALIFYING SIGNAL RIGHT NOW** — Accuracy filters are holding back trades.\n\n"
+                f"• **4H Status:** {status_4h}\n\n"
+                f"• **1H Status:** {status_1h}"
+            )
 
         st.markdown("---")
         trades_1h = [t for t in active_trades if t.get("timeframe") == "1H"]
@@ -454,11 +497,18 @@ with tab_student:
             render_active_trades_table(trades_4h, tickers, "4H")
 
         st.markdown("---")
-        st.subheader(f"📚 Godzilla Backtest & Signal Audit Archive ({len(audit_archive)} Committed Signals)")
-        
-        # Filter controls for audit logbook
-        audit_filter = st.radio("Audit Timeframe Filter", ["All Time", "Last 24 Hours (1 Day)", "Last 7 Days (1 Week)", "Last 30 Days (1 Month)"], horizontal=True)
-        
+        st.subheader(f"📚 Godzilla Automatic Signal Audit Logbook ({len(audit_archive)} Tracked Bot Signals)")
+        st.markdown(
+            "<div style='color:#38bdf8;font-weight:700;margin-bottom:8px;'>Every signal emitted by the bot (active or inactive/uncommitted) is automatically recorded, followed against live price for TP1/TP2/TP3/SL, and saved here.</div>",
+            unsafe_allow_html=True
+        )
+
+        audit_filter = st.radio(
+            "Audit Timeframe Filter",
+            ["All Time", "Last 24 Hours (1 Day)", "Last 7 Days (1 Week)", "Last 30 Days (1 Month)"],
+            horizontal=True
+        )
+
         filtered_audit = []
         now_ts = time.time()
         for arch in audit_archive:
@@ -472,21 +522,42 @@ with tab_student:
                 continue
             filtered_audit.append(arch)
 
-        with st.expander(f"📖 Expanded Audit Logbook View ({len(filtered_audit)} Records Matching Filter)", expanded=True):
+        sl_count = sum(1 for a in filtered_audit if a.get("sl_hit"))
+        tp_count = sum(1 for a in filtered_audit if a.get("tp1_hit") or a.get("tp2_hit") or a.get("tp3_hit"))
+        open_count = sum(1 for a in filtered_audit if not a.get("sl_hit") and not a.get("tp3_hit"))
+
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Total Signals Logged", f"{len(filtered_audit)}")
+        s2.metric("TP Hits (TP1+)", f"{tp_count}")
+        s3.metric("SL Hits", f"{sl_count}")
+        s4.metric("Still Tracking", f"{open_count}")
+
+        with st.expander(f"📖 Full Automated Audit Logbook ({len(filtered_audit)} Signals)", expanded=True):
             if filtered_audit:
                 for idx, arch in enumerate(filtered_audit):
-                    c_dt = datetime.fromtimestamp(arch.get("committed_at", time.time()), tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+                    c_pkt = datetime.fromtimestamp(arch.get("committed_at", time.time()) + 18000, tz=timezone.utc).strftime('%a %H:%M PKT').upper()
                     d_col = "#34d399" if arch.get('direction') == "LONG" else "#f87171"
                     status_note = arch.get('status_note', 'ACTIVE')
-                    status_color = "#ef4444" if "SL" in status_note else "#34d399"
+                    status_color = "#f87171" if "SL" in status_note or "KILLED" in status_note else "#34d399"
+                    src_tag = arch.get("source_mode", "BOT_SIGNAL")
                     st.markdown(f"""
-                    **#{idx+1} | {arch.get('symbol')} [{arch.get('timeframe')}] <span style='color:{d_col};'>{arch.get('direction')}</span>** — Status: <span style='color:{status_color};font-weight:900;'>{status_note}</span> — Committed: *{c_dt}*
-                    * **Entry:** {fmt_px(arch.get('entry_price', 0))} | **Shared SL:** {fmt_px(arch.get('stop_loss', 0))}
-                    * **Targets:** TP1: {fmt_px(arch.get('tp1', 0))} ({arch.get('eta_tp1', '')}) | TP2: {fmt_px(arch.get('tp2', 0))} ({arch.get('eta_tp2', '')}) | TP3: {fmt_px(arch.get('tp3', 0))} ({arch.get('eta_tp3', '')})
-                    ---
+                    <div style='color:#ffffff;font-weight:700;'>
+                    <strong>#{idx+1} | {arch.get('symbol')} <span style='color:#facc15;'>[{arch.get('timeframe')}]</span> <span style='color:{d_col};'>{arch.get('direction')}</span></strong>
+                    — Outcome: <span style='color:{status_color};font-weight:900;'>{status_note}</span>
+                    — Source: <span style='color:#38bdf8;'>{src_tag}</span>
+                    — Logged: <span style='color:#facc15;'>{c_pkt}</span><br/>
+                    Entry: <strong>{fmt_px(arch.get('entry_price', 0))}</strong> | SL: <strong style='color:#f87171;'>{fmt_px(arch.get('stop_loss', 0))}</strong> |
+                    TP1: <strong style='color:#34d399;'>{fmt_px(arch.get('tp1', 0))}</strong> |
+                    TP2: <strong style='color:#34d399;'>{fmt_px(arch.get('tp2', 0))}</strong> |
+                    TP3: <strong style='color:#34d399;'>{fmt_px(arch.get('tp3', 0))}</strong>
+                    </div>
+                    <hr style='border-color:#1e3a5f;margin:8px 0;'/>
                     """, unsafe_allow_html=True)
             else:
-                st.info("No audit history matches the selected timeframe filter.")
+                st.markdown(
+                    "<div style='color:#ffffff;font-weight:700;'>No signals logged in this window yet. As soon as a 1H or 4H signal qualifies, it will be recorded automatically.</div>",
+                    unsafe_allow_html=True
+                )
 
     render_godzilla_dashboard()
 
@@ -498,9 +569,9 @@ with tab_pro:
     with p_col2:
         decay_lambda = st.slider("Decay Lambda (λ)", 0.05, 1.0, 0.35, 0.05)
     with p_col3:
-        imbalance_threshold = st.slider("Imbalance Threshold", 0.10, 0.80, 0.22, 0.05)
+        imbalance_threshold = st.slider("Imbalance Threshold", 0.10, 0.80, 0.25, 0.05)
     with p_col4:
-        garch_k = st.slider("GARCH Multiplier (k)", 1.0, 3.0, 1.5, 0.1)
+        garch_k = st.slider("GARCH Multiplier (k)", 1.0, 3.0, 1.8, 0.1)
 
     max_spread_phi = st.number_input("Max Spread Filter (φ)", value=0.0008, format="%.5f")
 
@@ -540,4 +611,4 @@ with tab_pro:
         for entry in audit_logs:
             st.text(f"[{entry.get('symbol')} {entry.get('timeframe')}] {entry.get('direction')} @ {entry.get('entry_price')} - {entry.get('status_note', 'ACTIVE')}")
     else:
-        st.caption("No confirmed signals logged yet.")
+        st.markdown("<div style='color:#ffffff;font-weight:700;'>No signals logged yet.</div>", unsafe_allow_html=True)
