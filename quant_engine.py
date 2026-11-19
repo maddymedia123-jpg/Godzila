@@ -201,9 +201,11 @@ class QuantEngine:
             elif drift > tp1_dist * 0.65:
                 sig.entry_status = "EXTENDED MOVE — WATCH PULLBACK OR NEXT SETUP"
                 sig.can_enter = True
+                sig.status = "ACTIVE_TRACKING"
             else:
                 sig.entry_status = "EXECUTE NOW — OPTIMAL ENTRY ZONE"
                 sig.can_enter = True
+                sig.status = "ACTIVE_TRACKING"
         else:
             drift = sig.entry_price - mid_price
             if mid_price <= sig.tp1:
@@ -217,19 +219,18 @@ class QuantEngine:
             elif drift > tp1_dist * 0.65:
                 sig.entry_status = "EXTENDED MOVE — WATCH BOUNCE OR NEXT SETUP"
                 sig.can_enter = True
+                sig.status = "ACTIVE_TRACKING"
             else:
                 sig.entry_status = "EXECUTE NOW — OPTIMAL ENTRY ZONE"
                 sig.can_enter = True
+                sig.status = "ACTIVE_TRACKING"
 
     def get_prioritized_signals(self) -> List[CommittedSignal]:
-        cand_4h = [
-            s for s in self.signals_by_tf.get("4H", [])
-            if s.status == "ACTIVE_TRACKING" and s.can_enter
-        ]
-        cand_1h = [
-            s for s in self.signals_by_tf.get("1H", [])
-            if s.status == "ACTIVE_TRACKING" and s.can_enter
-        ]
+        latest_4h = [self.signals_by_tf["4H"][-1]] if self.signals_by_tf.get("4H") else []
+        latest_1h = [self.signals_by_tf["1H"][-1]] if self.signals_by_tf.get("1H") else []
+
+        cand_4h = [s for s in latest_4h if s.status == "ACTIVE_TRACKING"]
+        cand_1h = [s for s in latest_1h if s.status == "ACTIVE_TRACKING"]
 
         qualified: List[CommittedSignal] = []
         primary_dir: Optional[str] = None
@@ -414,3 +415,110 @@ class QuantEngine:
                 return
             if direction == "SHORT" and d1_bias == "BULLISH":
                 self.status_by_tf[tf_label] = "NO SIGNAL — 4H SHORT AGAINST 1D BULLISH TREND"
+                return
+            alignment_str = "4H + 1D FULL ALIGNMENT" if d1_bias == bias else "4H QUALIFIED (1D NON-OPPOSING)"
+
+        cooldown_sec = 1800.0 if tf_label == "1H" else 7200.0
+        if (now - self._last_gen_by_tf[tf_label]) < cooldown_sec:
+            existing = self.signals_by_tf[tf_label]
+            if existing and existing[-1].status == "ACTIVE_TRACKING" and existing[-1].direction == direction:
+                self.status_by_tf[tf_label] = f"ACTIVE {tf_label} {direction} SIGNAL (HTF + DUAL ORDER FLOW CONFIRMED)"
+                return
+            mins_left = int((cooldown_sec - (now - self._last_gen_by_tf[tf_label])) / 60)
+            self.status_by_tf[tf_label] = f"NO NEW SIGNAL — {tf_label} COOLDOWN ({mins_left}m left)"
+            return
+
+        if direction == "LONG" and rsi_val > 72.0:
+            self.status_by_tf[tf_label] = f"NO SIGNAL — {tf_label} RSI OVERBOUGHT ({rsi_val:.1f})"
+            return
+        if direction == "SHORT" and rsi_val < 28.0:
+            self.status_by_tf[tf_label] = f"NO SIGNAL — {tf_label} RSI OVERSOLD ({rsi_val:.1f})"
+            return
+
+        if phi_t > self.max_spread_phi:
+            self.status_by_tf[tf_label] = f"NO SIGNAL — {tf_label} SPREAD TOO WIDE ({phi_t:.5f})"
+            return
+
+        req_imb = max(self.imbalance_threshold, 0.22) if tf_label == "1H" else max(self.imbalance_threshold * 0.85, 0.18)
+        if direction == "LONG" and (imb < req_imb or cvd_3m <= 0):
+            self.status_by_tf[tf_label] = f"NO SIGNAL — {tf_label} LONG AWAITING DUAL FLOW (Imb {imb:+.2f}, CVD {cvd_3m:+.1f})"
+            return
+        if direction == "SHORT" and (imb > -req_imb or cvd_3m >= 0):
+            self.status_by_tf[tf_label] = f"NO SIGNAL — {tf_label} SHORT AWAITING DUAL FLOW (Imb {imb:+.2f}, CVD {cvd_3m:+.1f})"
+            return
+
+        self.status_by_tf[tf_label] = f"ACTIVE {tf_label} {direction} SIGNAL (HTF + DUAL ORDER FLOW CONFIRMED)"
+
+        entry = b_bid if direction == "LONG" else b_ask
+        lev = 20 if tf_label == "1H" else 12
+        sl_dist, units, notional, margin = self.compute_tf_position_sizing(tf_label, entry, balance, 1.0, lev)
+
+        if direction == "LONG":
+            sl = entry - sl_dist
+            tp1 = entry + sl_dist * 1.50
+            tp2 = entry + sl_dist * 2.50
+            tp3 = entry + sl_dist * 4.00
+        else:
+            sl = entry + sl_dist
+            tp1 = entry - sl_dist * 1.50
+            tp2 = entry - sl_dist * 2.50
+            tp3 = entry - sl_dist * 4.00
+
+        if tf_label == "1H":
+            vel = max(atr_val * 0.50, mid * self.garch_sigma * 2.4, mid * 0.0030)
+            eta_tp1 = self._format_pkt_eta(now, abs(tp1 - entry) / vel, 1.0, 6.0)
+            eta_tp2 = self._format_pkt_eta(now, abs(tp2 - entry) / vel, 2.5, 12.0)
+            eta_tp3 = self._format_pkt_eta(now, abs(tp3 - entry) / vel, 4.5, 20.0)
+            tier = "1H HIGH-ACCURACY SETUP"
+        else:
+            vel = max((atr_val / 4.0) * 0.55, mid * self.garch_sigma * 2.0, mid * 0.0025)
+            eta_tp1 = self._format_pkt_eta(now, abs(tp1 - entry) / vel, 4.0, 16.0)
+            eta_tp2 = self._format_pkt_eta(now, abs(tp2 - entry) / vel, 8.0, 28.0)
+            eta_tp3 = self._format_pkt_eta(now, abs(tp3 - entry) / vel, 16.0, 48.0)
+            tier = "4H HIGH-ACCURACY SETUP"
+
+        tf_weight = 25.0 if tf_label == "4H" else 15.0
+        align_weight = 20.0 if three_tf_aligned else 10.0
+        flow_weight = min(25.0, abs(imb) * 30.0)
+        accuracy_score = round(tf_weight + align_weight + flow_weight, 1)
+
+        sl_pct = (sl_dist / entry) * 100.0
+        sig_id = f"{symbol}_{tf_label}_{direction}_{int(now)}"
+
+        sig = CommittedSignal(
+            signal_id=sig_id,
+            timestamp=now,
+            symbol=symbol,
+            timeframe=tf_label,
+            risk_tier=tier,
+            direction=direction,
+            entry_price=entry,
+            stop_loss=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            position_size_units=units,
+            position_notional_usd=notional,
+            margin_required_usd=margin,
+            leverage=lev,
+            eta_tp1_str=eta_tp1,
+            eta_tp2_str=eta_tp2,
+            eta_tp3_str=eta_tp3,
+            htf_summary=f"{tf_label} {bias} (RSI {rsi_val:.0f}) · Imb {imb:+.2f} · CVD {cvd_3m:+.1f}",
+            alignment_status=alignment_str,
+            risk_warning=f"{tf_label} Isolated Margin · ATR SL ({sl_pct:.2f}%) · Tracked to TP3 or SL",
+            accuracy_score=accuracy_score,
+            entry_status="EXECUTE NOW — OPTIMAL ENTRY ZONE",
+            can_enter=True,
+            status="ACTIVE_TRACKING",
+        )
+
+        self.signals_by_tf[tf_label] = [sig]
+        self._locked_dir_by_tf[tf_label] = direction
+        self._lock_ts_by_tf[tf_label] = now
+        self._last_gen_by_tf[tf_label] = now
+        self.emitted_signals_queue.append(sig)
+        utc_now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        self.audit_logbook.appendleft(
+            f"[{utc_now} UTC] [{tf_label}] {symbol} {direction} @ {entry:.4f} | Score {accuracy_score} | {alignment_str}"
+        )
