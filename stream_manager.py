@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,8 +21,12 @@ OKX_MAP = {
     "DOGEUSDT": "DOGE-USDT-SWAP",
 }
 REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
-PORTFOLIO_DB_KEY = "godzilla_active_portfolio_v10"
-AUDIT_DB_KEY = "godzilla_audit_archive_v10"
+
+PORTFOLIO_DB_KEY = "godzilla_active_portfolio_permanent"
+AUDIT_DB_KEY = "godzilla_audit_archive_permanent"
+LEGACY_AUDIT_KEYS = ["godzilla_audit_archive_v10", "godzilla_audit_archive_v9"]
+LEGACY_PORTFOLIO_KEYS = ["godzilla_active_portfolio_v10", "godzilla_active_portfolio_v9"]
+LOCAL_BACKUP_FILE = "godzilla_audit_backup.json"
 MAX_ACTIVE_TRADES = 10
 
 
@@ -45,6 +50,7 @@ class BinanceFuturesStreamManager:
         self.structural_zones: List[float] = []
 
         self.db = None
+        self.db_status: str = "LOCAL FILE ONLY"
         self.active_trades: List[Dict[str, Any]] = []
         self.audit_archive: List[Dict[str, Any]] = []
         self._init_turso_db()
@@ -60,6 +66,7 @@ class BinanceFuturesStreamManager:
             raw_url = turso_sec.get("database_url", "")
             turso_token = turso_sec.get("auth_token", "")
             if not raw_url or not turso_token:
+                self.db_status = "LOCAL FILE ONLY (NO TURSO SECRETS)"
                 return
 
             turso_url = raw_url.replace("libsql://", "https://").replace("wss://", "https://")
@@ -71,11 +78,26 @@ class BinanceFuturesStreamManager:
                     updated_at REAL
                 );
             """)
+            self.db_status = "TURSO + LOCAL BACKUP ACTIVE"
         except Exception as exc:
             logger.error(f"Turso DB disabled: {exc}")
             self.db = None
+            self.db_status = "LOCAL FILE ONLY (TURSO ERROR)"
+
+    def _save_local_backup(self):
+        try:
+            data = {
+                "active_trades": self.active_trades,
+                "audit_archive": self.audit_archive[:500],
+                "saved_at": time.time(),
+            }
+            with open(LOCAL_BACKUP_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception as exc:
+            logger.error(f"Local backup error: {exc}")
 
     def _save_portfolio_to_turso(self):
+        self._save_local_backup()
         if not self.db:
             return
         try:
@@ -89,28 +111,62 @@ class BinanceFuturesStreamManager:
                 "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
                 (AUDIT_DB_KEY, audit_payload, time.time()),
             )
+            self.db_status = "TURSO + LOCAL BACKUP ACTIVE"
         except Exception as exc:
             logger.error(f"Failed to persist portfolio to Turso: {exc}")
+            self.db_status = "LOCAL FILE ONLY (TURSO WRITE ERROR)"
 
     def _load_portfolio_from_turso(self):
-        if not self.db:
-            return
-        try:
-            res = self.db.execute("SELECT payload FROM global_trading_memory WHERE key = ?;", (PORTFOLIO_DB_KEY,))
-            rows = res.rows
-            if rows and rows[0][0]:
-                loaded = json.loads(rows[0][0])
-                if isinstance(loaded, list):
-                    self.active_trades = loaded
+        merged_trades: List[Dict[str, Any]] = []
+        merged_audit: List[Dict[str, Any]] = []
+        seen_trade_ids = set()
+        seen_audit_ids = set()
 
-            res_audit = self.db.execute("SELECT payload FROM global_trading_memory WHERE key = ?;", (AUDIT_DB_KEY,))
-            rows_audit = res_audit.rows
-            if rows_audit and rows_audit[0][0]:
-                loaded_audit = json.loads(rows_audit[0][0])
-                if isinstance(loaded_audit, list):
-                    self.audit_archive = loaded_audit
-        except Exception as exc:
-            logger.error(f"Failed to load portfolio from Turso: {exc}")
+        def add_trade(item: Dict[str, Any]):
+            tid = item.get("trade_id") or f"{item.get('symbol')}_{item.get('committed_at')}"
+            if tid not in seen_trade_ids:
+                seen_trade_ids.add(tid)
+                merged_trades.append(item)
+
+        def add_audit(item: Dict[str, Any]):
+            tid = item.get("trade_id") or f"{item.get('symbol')}_{item.get('committed_at')}"
+            if tid not in seen_audit_ids:
+                seen_audit_ids.add(tid)
+                merged_audit.append(item)
+
+        if self.db:
+            try:
+                for k in [PORTFOLIO_DB_KEY] + LEGACY_PORTFOLIO_KEYS:
+                    res = self.db.execute("SELECT payload FROM global_trading_memory WHERE key = ?;", (k,))
+                    if res.rows and res.rows[0][0]:
+                        loaded = json.loads(res.rows[0][0])
+                        if isinstance(loaded, list):
+                            for row in loaded:
+                                add_trade(row)
+
+                for k in [AUDIT_DB_KEY] + LEGACY_AUDIT_KEYS:
+                    res_audit = self.db.execute("SELECT payload FROM global_trading_memory WHERE key = ?;", (k,))
+                    if res_audit.rows and res_audit.rows[0][0]:
+                        loaded_audit = json.loads(res_audit.rows[0][0])
+                        if isinstance(loaded_audit, list):
+                            for row in loaded_audit:
+                                add_audit(row)
+            except Exception as exc:
+                logger.error(f"Failed to load portfolio from Turso: {exc}")
+
+        if os.path.exists(LOCAL_BACKUP_FILE):
+            try:
+                with open(LOCAL_BACKUP_FILE, "r", encoding="utf-8") as f:
+                    bdata = json.load(f)
+                for row in bdata.get("active_trades", []):
+                    add_trade(row)
+                for row in bdata.get("audit_archive", []):
+                    add_audit(row)
+            except Exception as exc:
+                logger.error(f"Failed to load local backup: {exc}")
+
+        self.active_trades = merged_trades
+        self.audit_archive = merged_audit
 
     @staticmethod
     def _signal_to_record(sig: CommittedSignal, source_mode: str = "BOT_SIGNAL") -> Dict[str, Any]:
@@ -131,6 +187,7 @@ class BinanceFuturesStreamManager:
             "eta_tp3": sig.eta_tp3_str,
             "alignment_status": sig.alignment_status,
             "accuracy_score": sig.accuracy_score,
+            "squeeze_alert": sig.squeeze_alert,
             "source_mode": source_mode,
             "committed_at": sig.timestamp,
             "tp1_hit": False,
@@ -204,7 +261,7 @@ class BinanceFuturesStreamManager:
             self._save_portfolio_to_turso()
 
     @staticmethod
-    def _step_record_against_price(rec: Dict[str, Any], mid_price: float) -> bool:
+    def _step_record_against_price(rec: Dict[str, Any], mid_price: float, squeeze_state: str = "NORMAL", squeeze_msg: str = "") -> bool:
         if mid_price <= 0:
             return False
         if rec.get("sl_hit"):
@@ -216,6 +273,18 @@ class BinanceFuturesStreamManager:
         tp2 = float(rec.get("tp2", 0.0))
         tp3 = float(rec.get("tp3", 0.0))
         changed = False
+
+        if direction == "SHORT" and squeeze_state == "SHORT_SQUEEZE_RISK":
+            if rec.get("squeeze_alert") != squeeze_msg:
+                rec["squeeze_alert"] = squeeze_msg
+                changed = True
+        elif direction == "LONG" and squeeze_state == "LONG_SQUEEZE_RISK":
+            if rec.get("squeeze_alert") != squeeze_msg:
+                rec["squeeze_alert"] = squeeze_msg
+                changed = True
+        elif rec.get("squeeze_alert"):
+            rec["squeeze_alert"] = ""
+            changed = True
 
         if (direction == "LONG" and mid_price <= sl) or (direction == "SHORT" and mid_price >= sl):
             rec["sl_hit"] = True
@@ -254,19 +323,19 @@ class BinanceFuturesStreamManager:
 
         return changed
 
-    def _update_active_trades_telemetry(self, symbol: str, mid_price: float) -> None:
+    def _update_active_trades_telemetry(self, symbol: str, mid_price: float, squeeze_state: str = "NORMAL", squeeze_msg: str = "") -> None:
         if mid_price <= 0:
             return
         changed = False
 
         for t in self.active_trades:
             if t.get("symbol") == symbol:
-                if self._step_record_against_price(t, mid_price):
+                if self._step_record_against_price(t, mid_price, squeeze_state, squeeze_msg):
                     changed = True
 
         for arch in self.audit_archive:
             if arch.get("symbol") == symbol:
-                if self._step_record_against_price(arch, mid_price):
+                if self._step_record_against_price(arch, mid_price, squeeze_state, squeeze_msg):
                     changed = True
 
         if changed:
@@ -318,6 +387,7 @@ class BinanceFuturesStreamManager:
             return {
                 "symbol": sym,
                 "status": self._connection_status,
+                "db_status": self.db_status,
                 "metrics": latest,
                 "liq_stats": latest.get("liq_stats", {}),
                 "prioritized_signals": latest.get("prioritized_signals", []),
@@ -408,7 +478,12 @@ class BinanceFuturesStreamManager:
                                             if metrics:
                                                 self._latest_states[sym] = metrics
                                                 self._auto_log_emitted_signals(eng)
-                                                self._update_active_trades_telemetry(sym, metrics["mid_price"])
+                                                self._update_active_trades_telemetry(
+                                                    sym,
+                                                    metrics["mid_price"],
+                                                    metrics.get("squeeze_state", "NORMAL"),
+                                                    metrics.get("squeeze_msg", ""),
+                                                )
                         except Exception:
                             pass
 
@@ -468,7 +543,12 @@ class BinanceFuturesStreamManager:
                                 if metrics:
                                     self._latest_states[sym] = metrics
                                     self._auto_log_emitted_signals(eng)
-                                    self._update_active_trades_telemetry(sym, metrics["mid_price"])
+                                    self._update_active_trades_telemetry(
+                                        sym,
+                                        metrics["mid_price"],
+                                        metrics.get("squeeze_state", "NORMAL"),
+                                        metrics.get("squeeze_msg", ""),
+                                    )
             return True
 
         async def ws_loop():
