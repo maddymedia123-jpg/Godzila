@@ -204,6 +204,7 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int):
     dir_color = "#34d399" if is_long else "#f87171"
     rank_label = "PRIMARY PRIORITY SIGNAL (#1)" if rank_idx == 0 else f"SECONDARY QUALIFIED SIGNAL (#{rank_idx + 1})"
     rank_color = "#facc15" if rank_idx == 0 else "#38bdf8"
+    sq_alert = getattr(sig, "squeeze_alert", "")
 
     with st.container(border=True):
         st.markdown(
@@ -232,9 +233,9 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int):
             unsafe_allow_html=True
         )
 
-        if sig.squeeze_alert:
+        if sq_alert:
             st.markdown(
-                f"<div class='gz-blink-red' style='margin-bottom:12px;'><span class='gz-blink-dot'></span>{sig.squeeze_alert}</div>",
+                f"<div class='gz-blink-red' style='margin-bottom:12px;'><span class='gz-blink-dot'></span>{sq_alert}</div>",
                 unsafe_allow_html=True
             )
 
@@ -268,7 +269,7 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int):
                 "eta_tp3": sig.eta_tp3_str,
                 "alignment_status": sig.alignment_status,
                 "accuracy_score": sig.accuracy_score,
-                "squeeze_alert": sig.squeeze_alert,
+                "squeeze_alert": sq_alert,
                 "committed_at": time.time(),
             }
             ok, msg = manager.commit_trade(trade_record)
