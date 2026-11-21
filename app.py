@@ -1,3 +1,5 @@
+import csv
+import io
 import time
 from datetime import datetime, timezone, timedelta
 import streamlit as st
@@ -12,6 +14,30 @@ st.set_page_config(
 
 st.markdown("""
     <style>
+    @keyframes gzBlinkRed {
+        0% { opacity: 1; box-shadow: 0 0 12px rgba(248, 113, 113, 0.95); }
+        50% { opacity: 0.25; box-shadow: 0 0 2px rgba(248, 113, 113, 0.2); }
+        100% { opacity: 1; box-shadow: 0 0 12px rgba(248, 113, 113, 0.95); }
+    }
+    .gz-blink-red {
+        animation: gzBlinkRed 1.0s infinite;
+        background-color: #1f0508 !important;
+        border: 1px solid #f87171 !important;
+        color: #ff6b6b !important;
+        font-weight: 900 !important;
+        padding: 8px 12px !important;
+        border-radius: 6px !important;
+        display: inline-block;
+    }
+    .gz-blink-dot {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background-color: #ff3b3b;
+        margin-right: 8px;
+        animation: gzBlinkRed 0.9s infinite;
+    }
     .stApp, .block-container {
         background-color: #000000 !important;
         color: #ffffff !important;
@@ -53,17 +79,23 @@ st.markdown("""
         border-radius: 6px !important;
         padding: 2px 8px !important;
     }
-    div[data-testid="stAlert"] {
-        background-color: #141105 !important;
-        border: 1px solid #facc15 !important;
+    .gz-entry-banner {
+        background-color: #051712 !important;
+        border: 1px solid #34d399 !important;
         border-radius: 8px !important;
-    }
-    div[data-testid="stAlert"] p,
-    div[data-testid="stAlert"] li,
-    div[data-testid="stAlert"] div,
-    div[data-testid="stAlert"] strong {
-        color: #ffffff !important;
+        padding: 12px 16px !important;
+        color: #6ee7b7 !important;
         font-weight: 800 !important;
+        margin-bottom: 12px !important;
+    }
+    .gz-nosignal-box {
+        background-color: #000000 !important;
+        border: 1px solid #38bdf8 !important;
+        border-radius: 8px !important;
+        padding: 16px 18px !important;
+        color: #38bdf8 !important;
+        font-weight: 800 !important;
+        line-height: 1.7 !important;
     }
     .gz-dark-wrapper {
         background-color: #000000;
@@ -146,6 +178,27 @@ def fmt_px(val: float) -> str:
     return f"${val:,.2f}"
 
 
+def build_audit_csv(rows: list) -> str:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Symbol", "Timeframe", "Direction", "Entry", "SL", "TP1", "TP2", "TP3", "Status", "SqueezeAlert", "LoggedTS"])
+    for r in rows:
+        writer.writerow([
+            r.get("symbol", ""),
+            r.get("timeframe", ""),
+            r.get("direction", ""),
+            r.get("entry_price", 0),
+            r.get("stop_loss", 0),
+            r.get("tp1", 0),
+            r.get("tp2", 0),
+            r.get("tp3", 0),
+            r.get("status_note", ""),
+            r.get("squeeze_alert", ""),
+            r.get("committed_at", 0),
+        ])
+    return buf.getvalue()
+
+
 def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int):
     is_long = sig.direction == "LONG"
     dir_color = "#34d399" if is_long else "#f87171"
@@ -174,9 +227,16 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int):
             unsafe_allow_html=True
         )
 
-        st.success(
-            f"✅ **{sig.entry_status}** — Current Price: **{fmt_px(mid_price)}** vs Entry: **{fmt_px(sig.entry_price)}**"
+        st.markdown(
+            f"<div class='gz-entry-banner'>✅ {sig.entry_status} — Current Price: <strong>{fmt_px(mid_price)}</strong> vs Entry: <strong>{fmt_px(sig.entry_price)}</strong></div>",
+            unsafe_allow_html=True
         )
+
+        if sig.squeeze_alert:
+            st.markdown(
+                f"<div class='gz-blink-red' style='margin-bottom:12px;'><span class='gz-blink-dot'></span>{sig.squeeze_alert}</div>",
+                unsafe_allow_html=True
+            )
 
         p1, p2, p3, p4, p5 = st.columns(5)
         p1.metric("Entry Zone", fmt_px(sig.entry_price))
@@ -208,6 +268,7 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int):
                 "eta_tp3": sig.eta_tp3_str,
                 "alignment_status": sig.alignment_status,
                 "accuracy_score": sig.accuracy_score,
+                "squeeze_alert": sig.squeeze_alert,
                 "committed_at": time.time(),
             }
             ok, msg = manager.commit_trade(trade_record)
@@ -253,6 +314,7 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
         eta1 = tr.get("eta_tp1", "~1h")
         eta2 = tr.get("eta_tp2", "~4h")
         eta3 = tr.get("eta_tp3", "~8h")
+        sq_alert = tr.get("squeeze_alert", "")
 
         live_px = float(tickers.get(t_sym, {}).get("price", 0.0))
         if live_px <= 0:
@@ -292,6 +354,11 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
         with st.container():
             st.markdown('<div class="gz-row-container">', unsafe_allow_html=True)
+            if sq_alert and not sl_hit:
+                st.markdown(
+                    f"<div class='gz-blink-red' style='margin-bottom:10px;'><span class='gz-blink-dot'></span>{sq_alert}</div>",
+                    unsafe_allow_html=True
+                )
             cols = st.columns([1.3, 1.3, 1.2, 3.2, 1.4, 1.3, 0.4])
 
             with cols[0]:
@@ -353,7 +420,7 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
             with cols[5]:
                 def status_badge(lbl: str, hit: bool, pct: float) -> str:
                     if sl_hit:
-                        return "<span style='color:#f87171;font-weight:900;font-size:13px;'>SL HIT</span>"
+                        return "<span class='gz-blink-red'><span class='gz-blink-dot'></span>SL HIT</span>"
                     if tp3_hit and lbl == "TP3":
                         return "<span style='color:#34d399;font-weight:900;font-size:13px;'>ALL TPs HIT</span>"
                     if hit or pct >= 100.0:
@@ -448,6 +515,16 @@ with tab_student:
         status_4h = snap.get("status_4h", "CALIBRATING...")
         active_trades = snap.get("active_trades", [])
         audit_archive = snap.get("audit_archive", [])
+        squeeze_state = metrics.get("squeeze_state", "NORMAL")
+        squeeze_msg = metrics.get("squeeze_msg", "")
+        has_sl_in_active = any(t.get("sl_hit") or t.get("squeeze_alert") for t in active_trades)
+
+        if squeeze_state != "NORMAL" or has_sl_in_active:
+            alert_txt = squeeze_msg or "ACTIVE TRADE WARNING: STOP-LOSS OR SQUEEZE CONDITION DETECTED"
+            st.markdown(
+                f"<div class='gz-blink-red' style='width:100%;margin-bottom:12px;'><span class='gz-blink-dot'></span>{alert_txt}</div>",
+                unsafe_allow_html=True
+            )
 
         mid_price = metrics.get("mid_price", 0.0)
         if mid_price <= 0.0 and coin in tickers:
@@ -485,11 +562,13 @@ with tab_student:
             for idx, sig in enumerate(prioritized_signals):
                 render_prioritized_signal_card(sig, mid_price, idx)
         else:
-            st.warning(
-                f"⏸️ **NO QUALIFYING SIGNAL RIGHT NOW** — Accuracy filters are holding back trades.\n\n"
-                f"• **4H Status:** {status_4h}\n\n"
-                f"• **1H Status:** {status_1h}"
-            )
+            st.markdown(f"""
+            <div class="gz-nosignal-box">
+                ⏸️ NO QUALIFYING SIGNAL RIGHT NOW — Accuracy filters are holding back trades.<br/><br/>
+                • 4H Status: {status_4h}<br/>
+                • 1H Status: {status_1h}
+            </div>
+            """, unsafe_allow_html=True)
 
         st.markdown("---")
         trades_1h = [t for t in active_trades if t.get("timeframe") == "1H"]
@@ -514,8 +593,15 @@ with tab_student:
         st.markdown("---")
         st.subheader(f"📚 Godzilla Automatic Signal Audit Logbook ({len(audit_archive)} Tracked Bot Signals)")
         st.markdown(
-            "<div style='color:#38bdf8;font-weight:700;margin-bottom:8px;'>Every signal emitted by the bot (active or inactive/uncommitted) is automatically recorded, followed against live price for TP1/TP2/TP3/SL, and saved here.</div>",
+            f"<div style='color:#38bdf8;font-weight:700;margin-bottom:8px;'>Storage: <strong>{snap.get('db_status', 'LOCAL FILE ONLY')}</strong> · Every signal emitted by the bot is automatically recorded, tracked against live price for TP1/TP2/TP3/SL, and saved.</div>",
             unsafe_allow_html=True
+        )
+
+        st.download_button(
+            "⬇️ Export Audit Logbook (CSV)",
+            data=build_audit_csv(audit_archive),
+            file_name="godzilla_audit_logbook.csv",
+            mime="text/csv"
         )
 
         audit_filter = st.radio(
