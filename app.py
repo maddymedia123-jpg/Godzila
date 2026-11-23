@@ -2,18 +2,21 @@ import csv
 import io
 import json
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
+
 import streamlit as st
+
 from stream_manager import BinanceFuturesStreamManager
 
 st.set_page_config(
     page_title="Godzilla",
     page_icon="🦖",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
 )
 
-st.markdown("""
+st.markdown(
+    """
     <style>
     @keyframes gzBlinkRed {
         0% { opacity: 1; box-shadow: 0 0 12px rgba(248, 113, 113, 0.95); }
@@ -144,7 +147,9 @@ st.markdown("""
         height: 100%;
     }
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
 
 @st.cache_resource
@@ -182,7 +187,21 @@ def fmt_px(val: float) -> str:
 def build_audit_csv(rows: list) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["Symbol", "Timeframe", "Direction", "Entry", "SL", "TP1", "TP2", "TP3", "Status", "AuditTag", "AuditNote", "SqueezeAlert", "LoggedTS"])
+    writer.writerow([
+        "Symbol",
+        "Timeframe",
+        "Direction",
+        "Entry",
+        "SL",
+        "TP1",
+        "TP2",
+        "TP3",
+        "Status",
+        "AuditTag",
+        "AuditNote",
+        "SqueezeAlert",
+        "LoggedTS",
+    ])
     for r in rows:
         writer.writerow([
             r.get("symbol", ""),
@@ -212,34 +231,34 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int):
     with st.container(border=True):
         st.markdown(
             f"<div style='color:{rank_color};font-weight:900;font-size:13px;letter-spacing:0.05em;margin-bottom:4px;'>★ {rank_label} · ACCURACY INDEX: {sig.accuracy_score:.1f}</div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
         r1, r2, r3 = st.columns([2.2, 2.6, 1.4])
         r1.markdown(
             f"### {sig.symbol} · <span style='color:{dir_color};'>{sig.direction}</span> · <span style='color:#facc15;'>[{sig.timeframe}]</span>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
         r2.markdown(
             f"<div style='color:#ffffff;font-weight:700;'><strong>Mode:</strong> {sig.risk_tier}</div>"
             f"<div style='color:#ffffff;font-weight:700;margin-top:4px;'>{sig.htf_summary}</div>"
             f"<div style='color:#34d399;font-weight:900;margin-top:4px;'>Alignment: {sig.alignment_status}</div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
         r3.markdown(
             f"<div style='color:#ffffff;font-weight:800;'>Leverage: <span style='color:#facc15;'>{sig.leverage}x</span></div>"
             f"<div style='color:#ffffff;font-weight:800;margin-top:4px;'>Margin: <span style='color:#38bdf8;'>${sig.margin_required_usd:,.2f}</span></div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
         st.markdown(
             f"<div class='gz-entry-banner'>✅ {sig.entry_status} — Current Price: <strong>{fmt_px(mid_price)}</strong> vs Entry: <strong>{fmt_px(sig.entry_price)}</strong></div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
         if sq_alert:
             st.markdown(
                 f"<div class='gz-blink-red' style='margin-bottom:12px;'><span class='gz-blink-dot'></span>{sq_alert}</div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
 
         p1, p2, p3, p4, p5 = st.columns(5)
@@ -249,11 +268,14 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int):
         p4.metric("TP 2", fmt_px(sig.tp2), sig.eta_tp2_str)
         p5.metric("TP 3", fmt_px(sig.tp3), sig.eta_tp3_str)
 
-        st.markdown(f"<div style='color:#facc15;font-weight:700;margin-bottom:8px;'>⚠️ {sig.risk_warning}</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='color:#facc15;font-weight:700;margin-bottom:8px;'>⚠️ {sig.risk_warning}</div>",
+            unsafe_allow_html=True,
+        )
 
         if st.button(
             f"🔒 Lock [{sig.timeframe}] {sig.symbol} {sig.direction} into Active Trades",
-            key=f"commit_prio_{rank_idx}_{sig.signal_id}"
+            key=f"commit_prio_{rank_idx}_{sig.signal_id}",
         ):
             trade_record = {
                 "trade_id": sig.signal_id,
@@ -286,24 +308,27 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
     if not trades_list:
         st.markdown(
             f"<div style='color:#ffffff;font-weight:700;'>No active {tab_prefix} trades locked in Godzilla Cloud yet.</div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
         return
 
     st.markdown('<div class="gz-dark-wrapper">', unsafe_allow_html=True)
-    st.markdown("""
-    <div class="gz-tracker-header">
-        <div style="display:grid;grid-template-columns:1.3fr 1.3fr 1.2fr 3.2fr 1.4fr 1.3fr 0.4fr;align-items:center;color:#38bdf8;">
-            <div>ASSET / PAIR</div>
-            <div>LIVE vs ENTRY PRICE</div>
-            <div>SHARED SL</div>
-            <div>PROXIMITY BAR (SL-LEFT, TP-RIGHT)</div>
-            <div>TP TARGET & PKT TIME</div>
-            <div>STATUS</div>
-            <div style="text-align:center;">KILL</div>
+    st.markdown(
+        """
+        <div class="gz-tracker-header">
+            <div style="display:grid;grid-template-columns:1.3fr 1.3fr 1.2fr 3.2fr 1.4fr 1.3fr 0.4fr;align-items:center;color:#38bdf8;">
+                <div>ASSET / PAIR</div>
+                <div>LIVE vs ENTRY PRICE</div>
+                <div>SHARED SL</div>
+                <div>PROXIMITY BAR (SL-LEFT, TP-RIGHT)</div>
+                <div>TP TARGET & PKT TIME</div>
+                <div>STATUS</div>
+                <div style="text-align:center;">KILL</div>
+            </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
     for tr in trades_list:
         t_id = tr.get("trade_id", "")
@@ -361,65 +386,80 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
             if sq_alert and not sl_hit:
                 st.markdown(
                     f"<div class='gz-blink-red' style='margin-bottom:10px;'><span class='gz-blink-dot'></span>{sq_alert}</div>",
-                    unsafe_allow_html=True
+                    unsafe_allow_html=True,
                 )
             cols = st.columns([1.3, 1.3, 1.2, 3.2, 1.4, 1.3, 0.4])
 
             with cols[0]:
-                st.markdown(f"""
-                <span style="display:inline-block;width:24px;height:24px;line-height:24px;text-align:center;border-radius:50%;background:{icon_color};color:#000000;font-weight:900;margin-right:6px;font-size:13px;">{icon_char}</span>
-                <strong style="font-size:16px;color:#ffffff;">{t_sym.replace('USDT','')}/USDT</strong>
-                <span style="background:{tf_badge_bg};color:#ffffff;font-size:11px;font-weight:900;padding:2px 6px;border-radius:3px;margin-left:4px;">{t_tf}</span><br/>
-                <span style="color:{dir_color};font-size:14px;font-weight:900;margin-left:30px;">{t_dir}</span>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f"""
+                    <span style="display:inline-block;width:24px;height:24px;line-height:24px;text-align:center;border-radius:50%;background:{icon_color};color:#000000;font-weight:900;margin-right:6px;font-size:13px;">{icon_char}</span>
+                    <strong style="font-size:16px;color:#ffffff;">{t_sym.replace('USDT','')}/USDT</strong>
+                    <span style="background:{tf_badge_bg};color:#ffffff;font-size:11px;font-weight:900;padding:2px 6px;border-radius:3px;margin-left:4px;">{t_tf}</span><br/>
+                    <span style="color:{dir_color};font-size:14px;font-weight:900;margin-left:30px;">{t_dir}</span>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
             with cols[1]:
-                st.markdown(f"""
-                <div style='font-size:15px;font-weight:900;color:#ffffff;'>Live: {fmt_px(live_px)}</div>
-                <div style='font-size:13px;font-weight:800;color:#38bdf8;'>Entry: {fmt_px(t_entry)}</div>
-                <div style='font-size:13px;font-weight:900;color:{diff_color};'>({price_diff_pct:+.2f}%)</div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f"""
+                    <div style='font-size:15px;font-weight:900;color:#ffffff;'>Live: {fmt_px(live_px)}</div>
+                    <div style='font-size:13px;font-weight:800;color:#38bdf8;'>Entry: {fmt_px(t_entry)}</div>
+                    <div style='font-size:13px;font-weight:900;color:{diff_color};'>({price_diff_pct:+.2f}%)</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
             with cols[2]:
                 st.markdown(
                     f"<div style='font-size:15px;font-weight:800;color:#ffffff;padding-top:4px;'>{fmt_px(t_sl)}<br/>"
                     f"<span style='color:#f87171;font-size:13px;font-weight:800;'>({sl_pct:+.2f}%)</span></div>",
-                    unsafe_allow_html=True
+                    unsafe_allow_html=True,
                 )
 
             with cols[3]:
                 if sl_hit:
                     st.markdown(
                         "<div style='font-size:13px;color:#f87171;font-weight:900;padding:12px 0;text-align:center;'>STOP-LOSS HIT — MONITORING FROZEN</div>",
-                        unsafe_allow_html=True
+                        unsafe_allow_html=True,
                     )
                 else:
-                    st.markdown(f"""
-                    <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#ffffff;margin-bottom:2px;font-weight:800;">
-                        <span>TP1 Progress:</span><span style="color:#34d399;">{p1_pct:.0f}%</span>
-                    </div>
-                    <div class="gz-progress-track"><div class="{fill_class}" style="width:{p1_pct}%;"></div></div>
-                    <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#ffffff;margin-bottom:2px;font-weight:800;">
-                        <span>TP2 Progress:</span><span style="color:#34d399;">{p2_pct:.0f}%</span>
-                    </div>
-                    <div class="gz-progress-track"><div class="{fill_class}" style="width:{p2_pct}%;"></div></div>
-                    <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#ffffff;margin-bottom:2px;font-weight:800;">
-                        <span>TP3 Progress:</span><span style="color:#34d399;">{p3_pct:.0f}%</span>
-                    </div>
-                    <div class="gz-progress-track"><div class="{fill_class}" style="width:{p3_pct}%;"></div></div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(
+                        f"""
+                        <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#ffffff;margin-bottom:2px;font-weight:800;">
+                            <span>TP1 Progress:</span><span style="color:#34d399;">{p1_pct:.0f}%</span>
+                        </div>
+                        <div class="gz-progress-track"><div class="{fill_class}" style="width:{p1_pct}%;"></div></div>
+                        <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#ffffff;margin-bottom:2px;font-weight:800;">
+                            <span>TP2 Progress:</span><span style="color:#34d399;">{p2_pct:.0f}%</span>
+                        </div>
+                        <div class="gz-progress-track"><div class="{fill_class}" style="width:{p2_pct}%;"></div></div>
+                        <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#ffffff;margin-bottom:2px;font-weight:800;">
+                            <span>TP3 Progress:</span><span style="color:#34d399;">{p3_pct:.0f}%</span>
+                        </div>
+                        <div class="gz-progress-track"><div class="{fill_class}" style="width:{p3_pct}%;"></div></div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
             with cols[4]:
                 if sl_hit:
-                    st.markdown("<div style='font-size:13px;color:#f87171;font-weight:800;padding-top:14px;'>Halted at SL.</div>", unsafe_allow_html=True)
+                    st.markdown(
+                        "<div style='font-size:13px;color:#f87171;font-weight:800;padding-top:14px;'>Halted at SL.</div>",
+                        unsafe_allow_html=True,
+                    )
                 else:
-                    st.markdown(f"""
-                    <div style="font-size:13px;line-height:1.7;color:#ffffff;font-weight:800;padding-top:2px;">
-                        <div>TP1: <strong>{fmt_px(t_tp1)}</strong><br/><span style='color:#38bdf8;font-size:12px;'>🕒 {eta1}</span></div>
-                        <div>TP2: <strong>{fmt_px(t_tp2)}</strong><br/><span style='color:#38bdf8;font-size:12px;'>🕒 {eta2}</span></div>
-                        <div>TP3: <strong>{fmt_px(t_tp3)}</strong><br/><span style='color:#38bdf8;font-size:12px;'>🕒 {eta3}</span></div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(
+                        f"""
+                        <div style="font-size:13px;line-height:1.7;color:#ffffff;font-weight:800;padding-top:2px;">
+                            <div>TP1: <strong>{fmt_px(t_tp1)}</strong><br/><span style='color:#38bdf8;font-size:12px;'>🕒 {eta1}</span></div>
+                            <div>TP2: <strong>{fmt_px(t_tp2)}</strong><br/><span style='color:#38bdf8;font-size:12px;'>🕒 {eta2}</span></div>
+                            <div>TP3: <strong>{fmt_px(t_tp3)}</strong><br/><span style='color:#38bdf8;font-size:12px;'>🕒 {eta3}</span></div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
             with cols[5]:
                 def status_badge(lbl: str, hit: bool, pct: float) -> str:
@@ -442,9 +482,9 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
                     manager.kill_trade(t_id)
                     st.rerun()
 
-            st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 pkt_tz = timezone(timedelta(hours=5))
@@ -454,8 +494,8 @@ hdr_col1, hdr_col2, hdr_col3 = st.columns([3.2, 1.4, 1.4])
 with hdr_col1:
     st.markdown("## 🦖 Godzilla")
     st.markdown(
-        f"<div style='color:#ffffff;font-weight:800;'>🕒 Server Clock: <span style='color:#facc15;'>{now_pkt.strftime('%H:%M:%S')} PKT</span> · Testing Mode: <span style='color:#34d399;'>1H & 4H ONLY</span></div>",
-        unsafe_allow_html=True
+        f"<div style='color:#ffffff;font-weight:800;'>🕒 Server Clock: <span style='color:#facc15;'>{now_pkt.strftime('%H:%M:%S')} PKT</span> · Perp Framework: <span style='color:#34d399;'>1H & 4H</span></div>",
+        unsafe_allow_html=True,
     )
 
 with hdr_col2:
@@ -469,17 +509,17 @@ with hdr_col3:
 tab_student, tab_pro, tab_vault = st.tabs([
     "🎯 Godzilla Prioritized Signal Terminal (1H · 4H)",
     "🔬 Godzilla Order Book & Audit Terminal",
-    "💾 Persistent Backtest & Accuracy Vault (Turso)"
+    "💾 Persistent Backtest & Accuracy Vault (Turso)",
 ])
 
 with tab_student:
     ctrl_col1, ctrl_col2 = st.columns([2.2, 1.3])
     with ctrl_col1:
         selected_coin = st.radio(
-            "Select Asset to Scan",
+            "Select Perpetual Asset to Scan",
             ASSETS,
             index=ASSETS.index(st.session_state.student_coin),
-            horizontal=True
+            horizontal=True,
         )
         st.session_state.student_coin = selected_coin
 
@@ -489,7 +529,7 @@ with tab_student:
             min_value=10.0,
             value=float(st.session_state.student_balance),
             step=10.0,
-            format="%.2f"
+            format="%.2f",
         )
         st.session_state.student_balance = student_balance
 
@@ -503,7 +543,7 @@ with tab_student:
         imbalance_threshold=0.25,
         max_spread_phi=0.0008,
         garch_k=1.8,
-        structural_zones=[]
+        structural_zones=[],
     )
 
     @st.fragment(run_every=0.5 if auto_refresh else None)
@@ -528,7 +568,7 @@ with tab_student:
             alert_txt = squeeze_msg or "ACTIVE TRADE WARNING: STOP-LOSS OR SQUEEZE CONDITION DETECTED"
             st.markdown(
                 f"<div class='gz-blink-red' style='width:100%;margin-bottom:12px;'><span class='gz-blink-dot'></span>{alert_txt}</div>",
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
 
         mid_price = metrics.get("mid_price", 0.0)
@@ -551,12 +591,12 @@ with tab_student:
         l1.metric(
             "Long Liquidation Cluster",
             fmt_px(liq.get("long_cluster", 0.0)),
-            f"${liq.get('long_usd', 0.0):,.0f} Est. Pool"
+            f"${liq.get('long_usd', 0.0):,.0f} Est. Pool",
         )
         l2.metric(
             "Short Liquidation Cluster",
             fmt_px(liq.get("short_cluster", 0.0)),
-            f"${liq.get('short_usd', 0.0):,.0f} Est. Pool"
+            f"${liq.get('short_usd', 0.0):,.0f} Est. Pool",
         )
         l3.metric("RSI Momentum (1H / 4H)", f"1H: {tf_rsi.get('1H', 50.0):.1f} | 4H: {tf_rsi.get('4H', 50.0):.1f}")
 
@@ -567,13 +607,16 @@ with tab_student:
             for idx, sig in enumerate(prioritized_signals):
                 render_prioritized_signal_card(sig, mid_price, idx)
         else:
-            st.markdown(f"""
-            <div class="gz-nosignal-box">
-                ⏸️ NO QUALIFYING SIGNAL RIGHT NOW — Accuracy filters are holding back trades.<br/><br/>
-                • 4H Status: {status_4h}<br/>
-                • 1H Status: {status_1h}
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                f"""
+                <div class="gz-nosignal-box">
+                    ⏸️ NO QUALIFYING SIGNAL RIGHT NOW — Framework filters are holding back trades.<br/><br/>
+                    • 4H Status: {status_4h}<br/>
+                    • 1H Status: {status_1h}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
         st.markdown("---")
         trades_1h = [t for t in active_trades if t.get("timeframe") == "1H"]
@@ -583,7 +626,7 @@ with tab_student:
         act_tab_all, act_tab_1h, act_tab_4h = st.tabs([
             f"📋 All Active Trades ({len(active_trades)})",
             f"⚡ Active 1H Trades ({len(trades_1h)})",
-            f"🌊 Active 4H Trades ({len(trades_4h)})"
+            f"🌊 Active 4H Trades ({len(trades_4h)})",
         ])
 
         with act_tab_all:
@@ -598,8 +641,8 @@ with tab_student:
         st.markdown("---")
         st.subheader(f"📚 Godzilla Automatic Signal Audit Logbook ({len(audit_archive)} Tracked Bot Signals)")
         st.markdown(
-            f"<div style='color:#38bdf8;font-weight:700;margin-bottom:8px;'>Storage: <strong>{snap.get('db_status', 'LOCAL FILE ONLY')}</strong> · Every signal emitted by the bot is automatically recorded, tracked against live price for TP1/TP2/TP3/SL, and saved.</div>",
-            unsafe_allow_html=True
+            f"<div style='color:#38bdf8;font-weight:700;margin-bottom:8px;'>Storage: <strong>{snap.get('db_status', 'LOCAL FILE ONLY')}</strong> · Every signal emitted by the framework is recorded, tracked for TP1/TP2/TP3/SL, and saved.</div>",
+            unsafe_allow_html=True,
         )
 
         dl_col1, dl_col2 = st.columns(2)
@@ -608,7 +651,7 @@ with tab_student:
                 "⬇️ Export Audit Logbook (CSV)",
                 data=build_audit_csv(audit_archive),
                 file_name="godzilla_audit_logbook.csv",
-                mime="text/csv"
+                mime="text/csv",
             )
         with dl_col2:
             st.download_button(
@@ -619,13 +662,13 @@ with tab_student:
                     "audit_reviews": snap.get("audit_reviews", []),
                 }, indent=2),
                 file_name="godzilla_full_backup.json",
-                mime="application/json"
+                mime="application/json",
             )
 
         audit_filter = st.radio(
             "Audit Timeframe Filter",
             ["All Time", "Last 24 Hours (1 Day)", "Last 7 Days (1 Week)", "Last 30 Days (1 Month)"],
-            horizontal=True
+            horizontal=True,
         )
 
         filtered_audit = []
@@ -657,31 +700,34 @@ with tab_student:
         with st.expander(f"📖 Full Automated Audit Logbook ({len(filtered_audit)} Signals)", expanded=True):
             if filtered_audit:
                 for idx, arch in enumerate(filtered_audit):
-                    c_pkt = datetime.fromtimestamp(arch.get("committed_at", time.time()) + 18000, tz=timezone.utc).strftime('%a %H:%M PKT').upper()
-                    d_col = "#34d399" if arch.get('direction') == "LONG" else "#f87171"
-                    status_note = arch.get('status_note', 'ACTIVE')
+                    c_pkt = datetime.fromtimestamp(arch.get("committed_at", time.time()) + 18000, tz=timezone.utc).strftime("%a %H:%M PKT").upper()
+                    d_col = "#34d399" if arch.get("direction") == "LONG" else "#f87171"
+                    status_note = arch.get("status_note", "ACTIVE")
                     status_color = "#f87171" if "SL" in status_note or "KILLED" in status_note else "#34d399"
                     src_tag = arch.get("source_mode", "BOT_SIGNAL")
                     a_tag = arch.get("audit_tag", "PENDING_REVIEW")
                     a_note = arch.get("audit_note", "")
                     note_html = f" · Audit: <span style='color:#facc15;'>[{a_tag}] {a_note}</span>" if a_note or a_tag != "PENDING_REVIEW" else ""
-                    st.markdown(f"""
-                    <div style='color:#ffffff;font-weight:700;'>
-                    <strong>#{idx+1} | {arch.get('symbol')} <span style='color:#facc15;'>[{arch.get('timeframe')}]</span> <span style='color:{d_col};'>{arch.get('direction')}</span></strong>
-                    — Outcome: <span style='color:{status_color};font-weight:900;'>{status_note}</span>
-                    — Source: <span style='color:#38bdf8;'>{src_tag}</span>
-                    — Logged: <span style='color:#facc15;'>{c_pkt}</span>{note_html}<br/>
-                    Entry: <strong>{fmt_px(arch.get('entry_price', 0))}</strong> | SL: <strong style='color:#f87171;'>{fmt_px(arch.get('stop_loss', 0))}</strong> |
-                    TP1: <strong style='color:#34d399;'>{fmt_px(arch.get('tp1', 0))}</strong> |
-                    TP2: <strong style='color:#34d399;'>{fmt_px(arch.get('tp2', 0))}</strong> |
-                    TP3: <strong style='color:#34d399;'>{fmt_px(arch.get('tp3', 0))}</strong>
-                    </div>
-                    <hr style='border-color:#1e3a5f;margin:8px 0;'/>
-                    """, unsafe_allow_html=True)
+                    st.markdown(
+                        f"""
+                        <div style='color:#ffffff;font-weight:700;'>
+                        <strong>#{idx+1} | {arch.get('symbol')} <span style='color:#facc15;'>[{arch.get('timeframe')}]</span> <span style='color:{d_col};'>{arch.get('direction')}</span></strong>
+                        — Outcome: <span style='color:{status_color};font-weight:900;'>{status_note}</span>
+                        — Source: <span style='color:#38bdf8;'>{src_tag}</span>
+                        — Logged: <span style='color:#facc15;'>{c_pkt}</span>{note_html}<br/>
+                        Entry: <strong>{fmt_px(arch.get('entry_price', 0))}</strong> | SL: <strong style='color:#f87171;'>{fmt_px(arch.get('stop_loss', 0))}</strong> |
+                        TP1: <strong style='color:#34d399;'>{fmt_px(arch.get('tp1', 0))}</strong> |
+                        TP2: <strong style='color:#34d399;'>{fmt_px(arch.get('tp2', 0))}</strong> |
+                        TP3: <strong style='color:#34d399;'>{fmt_px(arch.get('tp3', 0))}</strong>
+                        </div>
+                        <hr style='border-color:#1e3a5f;margin:8px 0;'/>
+                        """,
+                        unsafe_allow_html=True,
+                    )
             else:
                 st.markdown(
                     "<div style='color:#ffffff;font-weight:700;'>No signals logged in this window yet. As soon as a 1H or 4H signal qualifies, it will be recorded automatically.</div>",
-                    unsafe_allow_html=True
+                    unsafe_allow_html=True,
                 )
 
     render_godzilla_dashboard()
@@ -690,7 +736,7 @@ with tab_pro:
     st.subheader("🔬 Godzilla Microstructure & Audit Terminal")
     p_col1, p_col2, p_col3, p_col4 = st.columns(4)
     with p_col1:
-        pro_symbol = st.selectbox("Pro Asset", ASSETS, index=0)
+        pro_symbol = st.selectbox("Pro Perpetual Asset", ASSETS, index=0)
     with p_col2:
         decay_lambda = st.slider("Decay Lambda (λ)", 0.05, 1.0, 0.35, 0.05)
     with p_col3:
@@ -710,7 +756,7 @@ with tab_pro:
         imbalance_threshold=imbalance_threshold,
         max_spread_phi=max_spread_phi,
         garch_k=garch_k,
-        structural_zones=[]
+        structural_zones=[],
     )
 
     pro_snap = manager.get_snapshot(pro_symbol)
@@ -735,17 +781,17 @@ with tab_vault:
     v_snap = manager.get_snapshot(st.session_state.student_coin)
     st.markdown(
         f"<div style='color:#34d399;font-weight:800;margin-bottom:12px;'>Database Connection Status: {v_snap.get('db_status', 'LOCAL FILE ONLY')}</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     v_col1, v_col2 = st.columns(2)
     with v_col1:
-        st.markdown("### 📊 Save Backtest Results")
-        bt_title = st.text_input("Backtest Label", value="50-Day Rule / Godzilla Backtest")
+        st.markdown("### 📊 Save Perpetual Backtest Results")
+        bt_title = st.text_input("Backtest Label", value="Perp Backtest Snapshot")
         bt_text = st.text_area(
-            "Paste Backtest Results & Parameters",
+            "Paste Perpetual Backtest Results & Parameters",
             height=180,
-            placeholder="Paste return %, max drawdown, win rate, coin list, and caveats here..."
+            placeholder="Paste return %, max drawdown, win rate, fees/funding, coin scope, and caveats...",
         )
         if st.button("💾 Save Backtest to Turso & App"):
             if bt_text.strip():
@@ -754,16 +800,25 @@ with tab_vault:
                 st.rerun()
 
     with v_col2:
-        st.markdown("### 🔍 Save Missed Accuracy & Audit Review")
+        st.markdown("### 🔍 Log Framework Inaccuracy / Missing Point")
         rev_tag = st.selectbox(
-            "Root Cause / Audit Category",
-            ["SHORT_SQUEEZE_REVERSAL", "LONG_SQUEEZE_FLUSH", "NO_TREND_CHOP", "CLEAN_TREND_TP", "MISSED_CONFLUENCE"]
+            "Framework Audit Category",
+            [
+                "FRAMEWORK_WORKING_NORMAL_LOSS",
+                "FRAMEWORK_MISSING_FILTER",
+                "WARNING_FALSE_NOISE",
+                "WARNING_MISSED_MOVE",
+                "CHOP_OR_SQUEEZE_TRAP",
+            ],
         )
-        rev_note = st.text_input("Accuracy Miss / Lesson Summary", placeholder="e.g., 25 SLs hit on bounce after cascade; add squeeze reclaim buy")
+        rev_note = st.text_input(
+            "What Was Wrong or Missing in Framework / Warning?",
+            placeholder="e.g., Normal SL in trend vs warning triggered too early or filter missed chop",
+        )
         rev_payload = st.text_area(
-            "Paste Audit Log Summary / Trade Notes",
+            "Paste Audit Log / Trade Details for Future Framework Update",
             height=135,
-            placeholder="Paste audit notes or signal outcomes to store for future updates..."
+            placeholder="Paste trade IDs, prices, timestamps, or notes to update framework from logs...",
         )
         if st.button("💾 Save Audit Review to Turso & App"):
             if rev_note.strip() or rev_payload.strip():
@@ -772,7 +827,7 @@ with tab_vault:
                 st.rerun()
 
     st.markdown("---")
-    st.markdown("### 🏷️ Tag Individual Logged Signals in Audit Logbook")
+    st.markdown("### 🏷️ Tag Logged Signals by Framework Behavior")
     all_audits = v_snap.get("audit_archive", [])
     if all_audits:
         options_map = {
@@ -783,18 +838,27 @@ with tab_vault:
         t_col1, t_col2 = st.columns([1.2, 2.5])
         with t_col1:
             sig_tag = st.selectbox(
-                "Signal Tag",
-                ["CLEAN_TREND", "SHORT_SQUEEZE", "LONG_SQUEEZE", "CHOP_SL", "MISSED_TP", "FALSE_BREAKOUT"]
+                "Signal Audit Tag",
+                [
+                    "FRAMEWORK_CLEAN_WIN",
+                    "FRAMEWORK_NORMAL_LOSS",
+                    "FRAMEWORK_GAP_OR_BUG",
+                    "WARNING_ACCURATE",
+                    "WARNING_NOISE",
+                ],
             )
         with t_col2:
-            sig_note = st.text_input("Audit Note for This Signal", placeholder="Why did it win/lose or miss accuracy?")
+            sig_note = st.text_input(
+                "Audit Note for This Signal",
+                placeholder="Was this a normal loss/win within framework or a genuine framework/warning gap?",
+            )
         if st.button("✅ Save Tag to Signal Record"):
             manager.tag_audit_record(options_map[chosen_label], sig_tag, sig_note)
             st.success("Signal audit tag saved to Turso.")
             st.rerun()
 
     st.markdown("---")
-    st.markdown("### 📋 Copy-Paste Ready Stored Data (For Future Updates)")
+    st.markdown("### 📋 Copy-Paste Ready Stored Data (For Future Framework Updates)")
     combined_export = json.dumps({
         "db_status": v_snap.get("db_status", ""),
         "backtest_snapshots": v_snap.get("backtest_snapshots", []),
