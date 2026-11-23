@@ -147,7 +147,6 @@ class QuantEngine:
         rsi_val = self._compute_rsi(closes, 14)
         self.tf_rsi[tf_label] = rsi_val
 
-        # Trend spread strength (%) between fast and slow EMA relative to price
         ema_spread_pct = abs(ema_fast - ema_slow) / max(last_close, 1e-8) * 100.0
         self.tf_trend_strength[tf_label] = ema_spread_pct
 
@@ -192,11 +191,13 @@ class QuantEngine:
 
     def detect_squeeze_state(self, now: float, mid_price: float, imb: float, cvd_3m: float) -> Tuple[str, str]:
         """
-        Returns (regime_label, squeeze_warning_text):
-        - SHORT_SQUEEZE_RISK: Bearish HTF/EMA bias, but strong upward bounce/buy flow/bid stack suggests squeeze.
-        - LONG_SQUEEZE_RISK: Bullish HTF/EMA bias, but strong downward drop/sell flow/ask stack suggests squeeze.
-        - NO_TREND_CHOP: Low trend separation / flat structure.
-        - NORMAL: Clean trend conditions.
+        Directionally consistent squeeze & chop detector:
+        - SHORT_SQUEEZE_RISK: Price is pumping upward sharply with positive buy flow/imbalance
+          (shorts getting squeezed upward — dangerous for SHORT positions).
+        - LONG_SQUEEZE_RISK: Price is dumping downward sharply with negative sell flow/imbalance
+          (longs getting flushed downward — dangerous for LONG positions).
+        - NO_TREND_CHOP: Flat EMA spread on both 1H and 4H.
+        - NORMAL: Clean directional trend conditions.
         """
         h4_bias = self.tf_bias.get("4H", "CALIBRATING")
         h1_bias = self.tf_bias.get("1H", "CALIBRATING")
@@ -205,37 +206,48 @@ class QuantEngine:
 
         closes_1h = self.tf_closes.get("1H", [])
         bounce_1h_pct = 0.0
-        if len(closes_1h) >= 4:
-            recent_min = min(closes_1h[-4:])
-            bounce_1h_pct = ((mid_price - recent_min) / max(recent_min, 1e-8)) * 100.0
-
         drop_1h_pct = 0.0
-        if len(closes_1h) >= 4:
-            recent_max = max(closes_1h[-4:])
-            drop_1h_pct = ((recent_max - mid_price) / max(recent_max, 1e-8)) * 100.0
+        net_move_pct = 0.0
 
-        # Short squeeze warning: bearish structure with strong buy flow / bid imbalance or sharp bounce
-        if (h4_bias == "BEARISH" or h1_bias == "BEARISH") and (
-            (imb > 0.35 and cvd_3m > 0) or (bounce_1h_pct > 1.2 and imb > 0.15)
+        if len(closes_1h) >= 4:
+            recent_slice = closes_1h[-4:]
+            recent_min = min(recent_slice)
+            recent_max = max(recent_slice)
+            anchor_px = recent_slice[0]
+            bounce_1h_pct = ((mid_price - recent_min) / max(recent_min, 1e-8)) * 100.0
+            drop_1h_pct = ((recent_max - mid_price) / max(recent_max, 1e-8)) * 100.0
+            net_move_pct = ((mid_price - anchor_px) / max(anchor_px, 1e-8)) * 100.0
+
+        # Upward pump / short squeeze: requires actual upward bounce AND net upward move + positive flow
+        if (
+            net_move_pct > 0.60
+            and bounce_1h_pct > 1.35
+            and imb > 0.35
+            and cvd_3m > 0
+            and (h4_bias == "BEARISH" or h1_bias == "BEARISH")
         ):
             return (
                 "SHORT_SQUEEZE_RISK",
-                f"SHORT SQUEEZE WARNING: Buy flow/bounce building against bearish structure (Imb {imb:+.2f}, CVD {cvd_3m:+.1f}, +{bounce_1h_pct:.2f}%)"
+                f"SHORT SQUEEZE (UPWARD PUMP): +{bounce_1h_pct:.2f}% bounce with Imb {imb:+.2f}, CVD {cvd_3m:+.1f} — Shorts at risk",
             )
 
-        # Long squeeze warning: bullish structure with strong sell flow / ask imbalance or sharp drop
-        if (h4_bias == "BULLISH" or h1_bias == "BULLISH") and (
-            (imb < -0.35 and cvd_3m < 0) or (drop_1h_pct > 1.2 and imb < -0.15)
+        # Downward flush / long squeeze: requires actual downward drop AND net downward move + negative flow
+        if (
+            net_move_pct < -0.60
+            and drop_1h_pct > 1.35
+            and imb < -0.35
+            and cvd_3m < 0
+            and (h4_bias == "BULLISH" or h1_bias == "BULLISH")
         ):
             return (
                 "LONG_SQUEEZE_RISK",
-                f"LONG SQUEEZE WARNING: Sell flow/drop building against bullish structure (Imb {imb:+.2f}, CVD {cvd_3m:+.1f}, -{drop_1h_pct:.2f}%)"
+                f"LONG SQUEEZE (DOWNWARD FLUSH): -{drop_1h_pct:.2f}% drop with Imb {imb:+.2f}, CVD {cvd_3m:+.1f} — Longs at risk",
             )
 
         if h4_bias != "CALIBRATING" and h1_bias != "CALIBRATING" and h4_str < 0.25 and h1_str < 0.20:
             return (
                 "NO_TREND_CHOP",
-                f"NO-TREND / CHOP: Tight EMA spread (4H {h4_str:.2f}%, 1H {h1_str:.2f}%) — High SL risk in sideways chop"
+                f"NO-TREND / CHOP: Tight EMA spread (4H {h4_str:.2f}%, 1H {h1_str:.2f}%) — Sideways chop filter active",
             )
 
         return ("NORMAL", "")
@@ -473,7 +485,6 @@ class QuantEngine:
         direction = "LONG" if bias == "BULLISH" else "SHORT"
         three_tf_aligned = h4_bias == bias and d1_bias == bias
 
-        # Block new shorts during short squeeze risk or new longs during long squeeze risk
         if direction == "SHORT" and squeeze_state == "SHORT_SQUEEZE_RISK":
             self.status_by_tf[tf_label] = f"VETOED {tf_label} SHORT — {squeeze_msg}"
             return
@@ -481,7 +492,6 @@ class QuantEngine:
             self.status_by_tf[tf_label] = f"VETOED {tf_label} LONG — {squeeze_msg}"
             return
 
-        # Block low-conviction signals in flat no-trend chop
         if squeeze_state == "NO_TREND_CHOP":
             self.status_by_tf[tf_label] = f"NO SIGNAL — {tf_label} BLOCKED BY NO-TREND / CHOP FILTER"
             return
