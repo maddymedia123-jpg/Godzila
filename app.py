@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import time
 from datetime import datetime, timezone, timedelta
 import streamlit as st
@@ -181,7 +182,7 @@ def fmt_px(val: float) -> str:
 def build_audit_csv(rows: list) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["Symbol", "Timeframe", "Direction", "Entry", "SL", "TP1", "TP2", "TP3", "Status", "SqueezeAlert", "LoggedTS"])
+    writer.writerow(["Symbol", "Timeframe", "Direction", "Entry", "SL", "TP1", "TP2", "TP3", "Status", "AuditTag", "AuditNote", "SqueezeAlert", "LoggedTS"])
     for r in rows:
         writer.writerow([
             r.get("symbol", ""),
@@ -193,6 +194,8 @@ def build_audit_csv(rows: list) -> str:
             r.get("tp2", 0),
             r.get("tp3", 0),
             r.get("status_note", ""),
+            r.get("audit_tag", "PENDING_REVIEW"),
+            r.get("audit_note", ""),
             r.get("squeeze_alert", ""),
             r.get("committed_at", 0),
         ])
@@ -463,9 +466,10 @@ with hdr_col3:
     st.write("")
     auto_refresh = st.toggle("⚡ Real-Time Stream (500ms)", value=True)
 
-tab_student, tab_pro = st.tabs([
+tab_student, tab_pro, tab_vault = st.tabs([
     "🎯 Godzilla Prioritized Signal Terminal (1H · 4H)",
-    "🔬 Godzilla Order Book & Audit Terminal"
+    "🔬 Godzilla Order Book & Audit Terminal",
+    "💾 Persistent Backtest & Accuracy Vault (Turso)"
 ])
 
 with tab_student:
@@ -598,12 +602,25 @@ with tab_student:
             unsafe_allow_html=True
         )
 
-        st.download_button(
-            "⬇️ Export Audit Logbook (CSV)",
-            data=build_audit_csv(audit_archive),
-            file_name="godzilla_audit_logbook.csv",
-            mime="text/csv"
-        )
+        dl_col1, dl_col2 = st.columns(2)
+        with dl_col1:
+            st.download_button(
+                "⬇️ Export Audit Logbook (CSV)",
+                data=build_audit_csv(audit_archive),
+                file_name="godzilla_audit_logbook.csv",
+                mime="text/csv"
+            )
+        with dl_col2:
+            st.download_button(
+                "⬇️ Export Full Backtest + Audit JSON",
+                data=json.dumps({
+                    "audit_archive": audit_archive,
+                    "backtest_snapshots": snap.get("backtest_snapshots", []),
+                    "audit_reviews": snap.get("audit_reviews", []),
+                }, indent=2),
+                file_name="godzilla_full_backup.json",
+                mime="application/json"
+            )
 
         audit_filter = st.radio(
             "Audit Timeframe Filter",
@@ -627,12 +644,15 @@ with tab_student:
         sl_count = sum(1 for a in filtered_audit if a.get("sl_hit"))
         tp_count = sum(1 for a in filtered_audit if a.get("tp1_hit") or a.get("tp2_hit") or a.get("tp3_hit"))
         open_count = sum(1 for a in filtered_audit if not a.get("sl_hit") and not a.get("tp3_hit"))
+        decided = tp_count + sl_count
+        realized_acc = (tp_count / decided * 100.0) if decided > 0 else 0.0
 
-        s1, s2, s3, s4 = st.columns(4)
+        s1, s2, s3, s4, s5 = st.columns(5)
         s1.metric("Total Signals Logged", f"{len(filtered_audit)}")
         s2.metric("TP Hits (TP1+)", f"{tp_count}")
         s3.metric("SL Hits", f"{sl_count}")
         s4.metric("Still Tracking", f"{open_count}")
+        s5.metric("Audited Accuracy", f"{realized_acc:.1f}%")
 
         with st.expander(f"📖 Full Automated Audit Logbook ({len(filtered_audit)} Signals)", expanded=True):
             if filtered_audit:
@@ -642,12 +662,15 @@ with tab_student:
                     status_note = arch.get('status_note', 'ACTIVE')
                     status_color = "#f87171" if "SL" in status_note or "KILLED" in status_note else "#34d399"
                     src_tag = arch.get("source_mode", "BOT_SIGNAL")
+                    a_tag = arch.get("audit_tag", "PENDING_REVIEW")
+                    a_note = arch.get("audit_note", "")
+                    note_html = f" · Audit: <span style='color:#facc15;'>[{a_tag}] {a_note}</span>" if a_note or a_tag != "PENDING_REVIEW" else ""
                     st.markdown(f"""
                     <div style='color:#ffffff;font-weight:700;'>
                     <strong>#{idx+1} | {arch.get('symbol')} <span style='color:#facc15;'>[{arch.get('timeframe')}]</span> <span style='color:{d_col};'>{arch.get('direction')}</span></strong>
                     — Outcome: <span style='color:{status_color};font-weight:900;'>{status_note}</span>
                     — Source: <span style='color:#38bdf8;'>{src_tag}</span>
-                    — Logged: <span style='color:#facc15;'>{c_pkt}</span><br/>
+                    — Logged: <span style='color:#facc15;'>{c_pkt}</span>{note_html}<br/>
                     Entry: <strong>{fmt_px(arch.get('entry_price', 0))}</strong> | SL: <strong style='color:#f87171;'>{fmt_px(arch.get('stop_loss', 0))}</strong> |
                     TP1: <strong style='color:#34d399;'>{fmt_px(arch.get('tp1', 0))}</strong> |
                     TP2: <strong style='color:#34d399;'>{fmt_px(arch.get('tp2', 0))}</strong> |
@@ -707,10 +730,75 @@ with tab_pro:
         st.markdown("**Top Asks (Price, Size)**")
         st.dataframe(pro_metrics.get("raw_asks", [])[:15], width="stretch")
 
-    st.markdown("**Godzilla Signal Audit Logbook**")
-    audit_logs = pro_snap.get("audit_archive", [])
-    if audit_logs:
-        for entry in audit_logs:
-            st.text(f"[{entry.get('symbol')} {entry.get('timeframe')}] {entry.get('direction')} @ {entry.get('entry_price')} - {entry.get('status_note', 'ACTIVE')}")
-    else:
-        st.markdown("<div style='color:#ffffff;font-weight:700;'>No signals logged yet.</div>", unsafe_allow_html=True)
+with tab_vault:
+    st.subheader("💾 Persistent Backtest & Accuracy Audit Vault (Turso + Local Backup)")
+    v_snap = manager.get_snapshot(st.session_state.student_coin)
+    st.markdown(
+        f"<div style='color:#34d399;font-weight:800;margin-bottom:12px;'>Database Connection Status: {v_snap.get('db_status', 'LOCAL FILE ONLY')}</div>",
+        unsafe_allow_html=True
+    )
+
+    v_col1, v_col2 = st.columns(2)
+    with v_col1:
+        st.markdown("### 📊 Save Backtest Results")
+        bt_title = st.text_input("Backtest Label", value="50-Day Rule / Godzilla Backtest")
+        bt_text = st.text_area(
+            "Paste Backtest Results & Parameters",
+            height=180,
+            placeholder="Paste return %, max drawdown, win rate, coin list, and caveats here..."
+        )
+        if st.button("💾 Save Backtest to Turso & App"):
+            if bt_text.strip():
+                manager.save_backtest_snapshot(bt_title, bt_text)
+                st.success("Backtest snapshot saved permanently to Turso and local backup.")
+                st.rerun()
+
+    with v_col2:
+        st.markdown("### 🔍 Save Missed Accuracy & Audit Review")
+        rev_tag = st.selectbox(
+            "Root Cause / Audit Category",
+            ["SHORT_SQUEEZE_REVERSAL", "LONG_SQUEEZE_FLUSH", "NO_TREND_CHOP", "CLEAN_TREND_TP", "MISSED_CONFLUENCE"]
+        )
+        rev_note = st.text_input("Accuracy Miss / Lesson Summary", placeholder="e.g., 25 SLs hit on bounce after cascade; add squeeze reclaim buy")
+        rev_payload = st.text_area(
+            "Paste Audit Log Summary / Trade Notes",
+            height=135,
+            placeholder="Paste audit notes or signal outcomes to store for future updates..."
+        )
+        if st.button("💾 Save Audit Review to Turso & App"):
+            if rev_note.strip() or rev_payload.strip():
+                manager.save_audit_review(rev_tag, rev_note, rev_payload)
+                st.success("Audit review saved permanently to Turso and local backup.")
+                st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 🏷️ Tag Individual Logged Signals in Audit Logbook")
+    all_audits = v_snap.get("audit_archive", [])
+    if all_audits:
+        options_map = {
+            f"{a.get('symbol')} [{a.get('timeframe')}] {a.get('direction')} @ {a.get('entry_price')} ({a.get('status_note', 'ACTIVE')})": a.get("trade_id")
+            for a in all_audits[:50]
+        }
+        chosen_label = st.selectbox("Select Logged Signal to Audit", list(options_map.keys()))
+        t_col1, t_col2 = st.columns([1.2, 2.5])
+        with t_col1:
+            sig_tag = st.selectbox(
+                "Signal Tag",
+                ["CLEAN_TREND", "SHORT_SQUEEZE", "LONG_SQUEEZE", "CHOP_SL", "MISSED_TP", "FALSE_BREAKOUT"]
+            )
+        with t_col2:
+            sig_note = st.text_input("Audit Note for This Signal", placeholder="Why did it win/lose or miss accuracy?")
+        if st.button("✅ Save Tag to Signal Record"):
+            manager.tag_audit_record(options_map[chosen_label], sig_tag, sig_note)
+            st.success("Signal audit tag saved to Turso.")
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 📋 Copy-Paste Ready Stored Data (For Future Updates)")
+    combined_export = json.dumps({
+        "db_status": v_snap.get("db_status", ""),
+        "backtest_snapshots": v_snap.get("backtest_snapshots", []),
+        "audit_reviews": v_snap.get("audit_reviews", []),
+        "recent_audit_archive": all_audits[:50],
+    }, indent=2)
+    st.code(combined_export, language="json")
