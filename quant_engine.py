@@ -174,7 +174,7 @@ class QuantEngine:
             self.garch_sigma = float(np.clip(sigma_decimal, 0.0005, 0.05))
             self.garch_last_fit = time.time()
         except Exception as exc:
-            logger.error(f"GARCH error: {exc}")
+            logger.error("GARCH error: %s", exc)
         return self.garch_sigma
 
     def ingest_trade(self, timestamp_sec: float, price: float, qty: float, is_buyer_maker: bool) -> None:
@@ -191,13 +191,8 @@ class QuantEngine:
 
     def detect_squeeze_state(self, now: float, mid_price: float, imb: float, cvd_3m: float) -> Tuple[str, str]:
         """
-        Directionally consistent squeeze & chop detector:
-        - SHORT_SQUEEZE_RISK: Price is pumping upward sharply with positive buy flow/imbalance
-          (shorts getting squeezed upward — dangerous for SHORT positions).
-        - LONG_SQUEEZE_RISK: Price is dumping downward sharply with negative sell flow/imbalance
-          (longs getting flushed downward — dangerous for LONG positions).
-        - NO_TREND_CHOP: Flat EMA spread on both 1H and 4H.
-        - NORMAL: Clean directional trend conditions.
+        High-threshold regime check so warnings only fire on genuine directional moves
+        and flat chop, without spamming noise on normal fluctuations.
         """
         h4_bias = self.tf_bias.get("4H", "CALIBRATING")
         h1_bias = self.tf_bias.get("1H", "CALIBRATING")
@@ -218,41 +213,41 @@ class QuantEngine:
             drop_1h_pct = ((recent_max - mid_price) / max(recent_max, 1e-8)) * 100.0
             net_move_pct = ((mid_price - anchor_px) / max(anchor_px, 1e-8)) * 100.0
 
-        # Upward pump / short squeeze: requires actual upward bounce AND net upward move + positive flow
         if (
-            net_move_pct > 0.60
-            and bounce_1h_pct > 1.35
-            and imb > 0.35
+            net_move_pct > 0.85
+            and bounce_1h_pct > 1.60
+            and imb > 0.45
             and cvd_3m > 0
             and (h4_bias == "BEARISH" or h1_bias == "BEARISH")
         ):
             return (
                 "SHORT_SQUEEZE_RISK",
-                f"SHORT SQUEEZE (UPWARD PUMP): +{bounce_1h_pct:.2f}% bounce with Imb {imb:+.2f}, CVD {cvd_3m:+.1f} — Shorts at risk",
+                f"SHORT SQUEEZE (UPWARD MOVE): +{bounce_1h_pct:.2f}% bounce, Imb {imb:+.2f}, CVD {cvd_3m:+.1f}",
             )
 
-        # Downward flush / long squeeze: requires actual downward drop AND net downward move + negative flow
         if (
-            net_move_pct < -0.60
-            and drop_1h_pct > 1.35
-            and imb < -0.35
+            net_move_pct < -0.85
+            and drop_1h_pct > 1.60
+            and imb < -0.45
             and cvd_3m < 0
             and (h4_bias == "BULLISH" or h1_bias == "BULLISH")
         ):
             return (
                 "LONG_SQUEEZE_RISK",
-                f"LONG SQUEEZE (DOWNWARD FLUSH): -{drop_1h_pct:.2f}% drop with Imb {imb:+.2f}, CVD {cvd_3m:+.1f} — Longs at risk",
+                f"LONG SQUEEZE (DOWNWARD MOVE): -{drop_1h_pct:.2f}% drop, Imb {imb:+.2f}, CVD {cvd_3m:+.1f}",
             )
 
-        if h4_bias != "CALIBRATING" and h1_bias != "CALIBRATING" and h4_str < 0.25 and h1_str < 0.20:
+        if h4_bias != "CALIBRATING" and h1_bias != "CALIBRATING" and h4_str < 0.20 and h1_str < 0.15:
             return (
                 "NO_TREND_CHOP",
-                f"NO-TREND / CHOP: Tight EMA spread (4H {h4_str:.2f}%, 1H {h1_str:.2f}%) — Sideways chop filter active",
+                f"NO-TREND / CHOP: Flat EMA spread (4H {h4_str:.2f}%, 1H {h1_str:.2f}%)",
             )
 
         return ("NORMAL", "")
 
-    def _refresh_signal_entry_gate(self, sig: CommittedSignal, mid_price: float, squeeze_state: str, squeeze_msg: str) -> None:
+    def _refresh_signal_entry_gate(
+        self, sig: CommittedSignal, mid_price: float, squeeze_state: str, squeeze_msg: str
+    ) -> None:
         tp1_dist = abs(sig.tp1 - sig.entry_price)
         sl_dist = abs(sig.entry_price - sig.stop_loss)
         if tp1_dist <= 1e-9 or sl_dist <= 1e-9:
