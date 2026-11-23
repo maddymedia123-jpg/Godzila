@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import streamlit as st
 
+import trend_paper
 from stream_manager import BinanceFuturesStreamManager
 
 st.set_page_config(
@@ -506,10 +507,11 @@ with hdr_col3:
     st.write("")
     auto_refresh = st.toggle("⚡ Real-Time Stream (500ms)", value=True)
 
-tab_student, tab_pro, tab_vault = st.tabs([
+tab_student, tab_pro, tab_vault, tab_trend = st.tabs([
     "🎯 Godzilla Prioritized Signal Terminal (1H · 4H)",
     "🔬 Godzilla Order Book & Audit Terminal",
     "💾 Persistent Backtest & Accuracy Vault (Turso)",
+    "📈 Trend Paper Trade (Daily)",
 ])
 
 with tab_student:
@@ -866,3 +868,6 @@ with tab_vault:
         "recent_audit_archive": all_audits[:50],
     }, indent=2)
     st.code(combined_export, language="json")
+
+with tab_trend:
+    trend_paper.render()
