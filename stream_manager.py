@@ -24,6 +24,8 @@ REV_OKX_MAP = {v: k for k, v in OKX_MAP.items()}
 
 PORTFOLIO_DB_KEY = "godzilla_active_portfolio_permanent"
 AUDIT_DB_KEY = "godzilla_audit_archive_permanent"
+BACKTEST_DB_KEY = "godzilla_backtest_snapshots_permanent"
+AUDIT_NOTES_DB_KEY = "godzilla_audit_reviews_permanent"
 LEGACY_AUDIT_KEYS = ["godzilla_audit_archive_v10", "godzilla_audit_archive_v9"]
 LEGACY_PORTFOLIO_KEYS = ["godzilla_active_portfolio_v10", "godzilla_active_portfolio_v9"]
 LOCAL_BACKUP_FILE = "godzilla_audit_backup.json"
@@ -53,6 +55,8 @@ class BinanceFuturesStreamManager:
         self.db_status: str = "LOCAL FILE ONLY"
         self.active_trades: List[Dict[str, Any]] = []
         self.audit_archive: List[Dict[str, Any]] = []
+        self.backtest_snapshots: List[Dict[str, Any]] = []
+        self.audit_reviews: List[Dict[str, Any]] = []
         self._init_turso_db()
         self._load_portfolio_from_turso()
 
@@ -82,13 +86,15 @@ class BinanceFuturesStreamManager:
         except Exception as exc:
             logger.error(f"Turso DB disabled: {exc}")
             self.db = None
-            self.db_status = "LOCAL FILE ONLY (TURSO ERROR)"
+            self.db_status = f"LOCAL FILE ONLY ({exc})"
 
     def _save_local_backup(self):
         try:
             data = {
                 "active_trades": self.active_trades,
                 "audit_archive": self.audit_archive[:500],
+                "backtest_snapshots": self.backtest_snapshots[:100],
+                "audit_reviews": self.audit_reviews[:200],
                 "saved_at": time.time(),
             }
             with open(LOCAL_BACKUP_FILE, "w", encoding="utf-8") as f:
@@ -101,24 +107,33 @@ class BinanceFuturesStreamManager:
         if not self.db:
             return
         try:
-            payload = json.dumps(self.active_trades)
+            now_ts = time.time()
             self.db.execute(
                 "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
-                (PORTFOLIO_DB_KEY, payload, time.time()),
+                (PORTFOLIO_DB_KEY, json.dumps(self.active_trades), now_ts),
             )
-            audit_payload = json.dumps(self.audit_archive[:500])
             self.db.execute(
                 "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
-                (AUDIT_DB_KEY, audit_payload, time.time()),
+                (AUDIT_DB_KEY, json.dumps(self.audit_archive[:500]), now_ts),
+            )
+            self.db.execute(
+                "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
+                (BACKTEST_DB_KEY, json.dumps(self.backtest_snapshots[:100]), now_ts),
+            )
+            self.db.execute(
+                "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
+                (AUDIT_NOTES_DB_KEY, json.dumps(self.audit_reviews[:200]), now_ts),
             )
             self.db_status = "TURSO + LOCAL BACKUP ACTIVE"
         except Exception as exc:
             logger.error(f"Failed to persist portfolio to Turso: {exc}")
-            self.db_status = "LOCAL FILE ONLY (TURSO WRITE ERROR)"
+            self.db_status = f"LOCAL FILE ONLY (TURSO WRITE ERROR: {exc})"
 
     def _load_portfolio_from_turso(self):
         merged_trades: List[Dict[str, Any]] = []
         merged_audit: List[Dict[str, Any]] = []
+        loaded_backtests: List[Dict[str, Any]] = []
+        loaded_reviews: List[Dict[str, Any]] = []
         seen_trade_ids = set()
         seen_audit_ids = set()
 
@@ -151,6 +166,18 @@ class BinanceFuturesStreamManager:
                         if isinstance(loaded_audit, list):
                             for row in loaded_audit:
                                 add_audit(row)
+
+                res_bt = self.db.execute("SELECT payload FROM global_trading_memory WHERE key = ?;", (BACKTEST_DB_KEY,))
+                if res_bt.rows and res_bt.rows[0][0]:
+                    data_bt = json.loads(res_bt.rows[0][0])
+                    if isinstance(data_bt, list):
+                        loaded_backtests = data_bt
+
+                res_rev = self.db.execute("SELECT payload FROM global_trading_memory WHERE key = ?;", (AUDIT_NOTES_DB_KEY,))
+                if res_rev.rows and res_rev.rows[0][0]:
+                    data_rev = json.loads(res_rev.rows[0][0])
+                    if isinstance(data_rev, list):
+                        loaded_reviews = data_rev
             except Exception as exc:
                 logger.error(f"Failed to load portfolio from Turso: {exc}")
 
@@ -162,11 +189,47 @@ class BinanceFuturesStreamManager:
                     add_trade(row)
                 for row in bdata.get("audit_archive", []):
                     add_audit(row)
+                if not loaded_backtests:
+                    loaded_backtests = bdata.get("backtest_snapshots", [])
+                if not loaded_reviews:
+                    loaded_reviews = bdata.get("audit_reviews", [])
             except Exception as exc:
                 logger.error(f"Failed to load local backup: {exc}")
 
         self.active_trades = merged_trades
         self.audit_archive = merged_audit
+        self.backtest_snapshots = loaded_backtests
+        self.audit_reviews = loaded_reviews
+
+    def save_backtest_snapshot(self, title: str, content: str) -> None:
+        with self._lock:
+            self.backtest_snapshots.insert(0, {
+                "id": f"bt_{int(time.time()*1000)}",
+                "title": title.strip() or "Backtest Snapshot",
+                "content": content.strip(),
+                "saved_at": time.time(),
+            })
+            self._save_portfolio_to_turso()
+
+    def save_audit_review(self, tag: str, missed_accuracy_note: str, audit_payload: str) -> None:
+        with self._lock:
+            self.audit_reviews.insert(0, {
+                "id": f"rev_{int(time.time()*1000)}",
+                "tag": tag,
+                "note": missed_accuracy_note.strip(),
+                "payload": audit_payload.strip(),
+                "saved_at": time.time(),
+            })
+            self._save_portfolio_to_turso()
+
+    def tag_audit_record(self, trade_id: str, audit_tag: str, audit_note: str) -> None:
+        with self._lock:
+            for arch in self.audit_archive:
+                if arch.get("trade_id") == trade_id:
+                    arch["audit_tag"] = audit_tag
+                    arch["audit_note"] = audit_note.strip()
+                    break
+            self._save_portfolio_to_turso()
 
     @staticmethod
     def _signal_to_record(sig: CommittedSignal, source_mode: str = "BOT_SIGNAL") -> Dict[str, Any]:
@@ -188,6 +251,8 @@ class BinanceFuturesStreamManager:
             "alignment_status": sig.alignment_status,
             "accuracy_score": sig.accuracy_score,
             "squeeze_alert": sig.squeeze_alert,
+            "audit_tag": "PENDING_REVIEW",
+            "audit_note": "",
             "source_mode": source_mode,
             "committed_at": sig.timestamp,
             "tp1_hit": False,
@@ -274,6 +339,7 @@ class BinanceFuturesStreamManager:
         tp3 = float(rec.get("tp3", 0.0))
         changed = False
 
+        # Only show active squeeze alert when the opposing squeeze is actively happening
         if direction == "SHORT" and squeeze_state == "SHORT_SQUEEZE_RISK":
             if rec.get("squeeze_alert") != squeeze_msg:
                 rec["squeeze_alert"] = squeeze_msg
@@ -282,9 +348,10 @@ class BinanceFuturesStreamManager:
             if rec.get("squeeze_alert") != squeeze_msg:
                 rec["squeeze_alert"] = squeeze_msg
                 changed = True
-        elif rec.get("squeeze_alert"):
-            rec["squeeze_alert"] = ""
-            changed = True
+        else:
+            if rec.get("squeeze_alert"):
+                rec["squeeze_alert"] = ""
+                changed = True
 
         if (direction == "LONG" and mid_price <= sl) or (direction == "SHORT" and mid_price >= sl):
             rec["sl_hit"] = True
@@ -399,6 +466,8 @@ class BinanceFuturesStreamManager:
                 "tf_rsi": dict(eng.tf_rsi),
                 "active_trades": [dict(t) for t in self.active_trades],
                 "audit_archive": [dict(a) for a in self.audit_archive],
+                "backtest_snapshots": [dict(b) for b in self.backtest_snapshots],
+                "audit_reviews": [dict(r) for r in self.audit_reviews],
                 "coin_tickers": coin_tickers,
                 "msg_count": self._msg_count,
             }
@@ -538,30 +607,4 @@ class BinanceFuturesStreamManager:
                                     self.risk_pct,
                                     self.structural_zones,
                                     self.scanner_active,
-                                    self.student_balance,
-                                )
-                                if metrics:
-                                    self._latest_states[sym] = metrics
-                                    self._auto_log_emitted_signals(eng)
-                                    self._update_active_trades_telemetry(
-                                        sym,
-                                        metrics["mid_price"],
-                                        metrics.get("squeeze_state", "NORMAL"),
-                                        metrics.get("squeeze_msg", ""),
-                                    )
-            return True
-
-        async def ws_loop():
-            while not self._stop_event.is_set():
-                try:
-                    await run_okx_ws()
-                except Exception as exc:
-                    with self._lock:
-                        self._connection_status = "RECONNECTING"
-                    logger.error(f"OKX WS error ({exc}), retrying in 2s...")
-                    await asyncio.sleep(2.0)
-
-        await asyncio.gather(seed_and_htf_loop(), ws_loop())
-
-    def shutdown(self):
-        self._stop_event.set()
+                                    self.student
