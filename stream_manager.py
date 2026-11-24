@@ -29,6 +29,7 @@ PORTFOLIO_DB_KEY = "godzilla_active_portfolio_permanent"
 AUDIT_DB_KEY = "godzilla_audit_archive_permanent"
 BACKTEST_DB_KEY = "godzilla_backtest_snapshots_permanent"
 AUDIT_NOTES_DB_KEY = "godzilla_audit_reviews_permanent"
+DINO_MEMORY_DB_KEY = "godzilla_dino_memory_permanent"
 LEGACY_AUDIT_KEYS = ["godzilla_audit_archive_v10", "godzilla_audit_archive_v9"]
 LEGACY_PORTFOLIO_KEYS = ["godzilla_active_portfolio_v10", "godzilla_active_portfolio_v9"]
 LOCAL_BACKUP_FILE = "godzilla_audit_backup.json"
@@ -60,6 +61,7 @@ class BinanceFuturesStreamManager:
         self.audit_archive: List[Dict[str, Any]] = []
         self.backtest_snapshots: List[Dict[str, Any]] = []
         self.audit_reviews: List[Dict[str, Any]] = []
+        self.dino_memory: List[Dict[str, Any]] = []
         self._init_turso_db()
         self._load_portfolio_from_turso()
 
@@ -100,6 +102,7 @@ class BinanceFuturesStreamManager:
                 "audit_archive": self.audit_archive[:500],
                 "backtest_snapshots": self.backtest_snapshots[:100],
                 "audit_reviews": self.audit_reviews[:200],
+                "dino_memory": self.dino_memory[:150],
                 "saved_at": time.time(),
             }
             with open(LOCAL_BACKUP_FILE, "w", encoding="utf-8") as f:
@@ -129,6 +132,10 @@ class BinanceFuturesStreamManager:
                 "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
                 (AUDIT_NOTES_DB_KEY, json.dumps(self.audit_reviews[:200]), now_ts),
             )
+            self.db.execute(
+                "INSERT OR REPLACE INTO global_trading_memory (key, payload, updated_at) VALUES (?, ?, ?);",
+                (DINO_MEMORY_DB_KEY, json.dumps(self.dino_memory[:150]), now_ts),
+            )
             self.db_status = "TURSO + LOCAL BACKUP ACTIVE"
         except Exception as exc:
             logger.error("Failed to persist portfolio to Turso: %s", exc)
@@ -139,6 +146,7 @@ class BinanceFuturesStreamManager:
         merged_audit: List[Dict[str, Any]] = []
         loaded_backtests: List[Dict[str, Any]] = []
         loaded_reviews: List[Dict[str, Any]] = []
+        loaded_dino: List[Dict[str, Any]] = []
         seen_trade_ids = set()
         seen_audit_ids = set()
 
@@ -183,6 +191,12 @@ class BinanceFuturesStreamManager:
                     data_rev = json.loads(res_rev.rows[0][0])
                     if isinstance(data_rev, list):
                         loaded_reviews = data_rev
+
+                res_dino = self.db.execute("SELECT payload FROM global_trading_memory WHERE key = ?;", (DINO_MEMORY_DB_KEY,))
+                if res_dino.rows and res_dino.rows[0][0]:
+                    data_dino = json.loads(res_dino.rows[0][0])
+                    if isinstance(data_dino, list):
+                        loaded_dino = data_dino
             except Exception as exc:
                 logger.error("Failed to load portfolio from Turso: %s", exc)
 
@@ -198,6 +212,8 @@ class BinanceFuturesStreamManager:
                     loaded_backtests = bdata.get("backtest_snapshots", [])
                 if not loaded_reviews:
                     loaded_reviews = bdata.get("audit_reviews", [])
+                if not loaded_dino:
+                    loaded_dino = bdata.get("dino_memory", [])
             except Exception as exc:
                 logger.error("Failed to load local backup: %s", exc)
 
@@ -205,6 +221,12 @@ class BinanceFuturesStreamManager:
         self.audit_archive = merged_audit
         self.backtest_snapshots = loaded_backtests
         self.audit_reviews = loaded_reviews
+        self.dino_memory = loaded_dino
+
+    def save_dino_entry(self, entry: Dict[str, Any]) -> None:
+        with self._lock:
+            self.dino_memory.insert(0, entry)
+            self._save_portfolio_to_turso()
 
     def save_backtest_snapshot(self, title: str, content: str) -> None:
         with self._lock:
@@ -483,6 +505,7 @@ class BinanceFuturesStreamManager:
                 "audit_archive": [dict(a) for a in self.audit_archive],
                 "backtest_snapshots": [dict(b) for b in self.backtest_snapshots],
                 "audit_reviews": [dict(r) for r in self.audit_reviews],
+                "dino_memory": [dict(d) for d in self.dino_memory],
                 "coin_tickers": coin_tickers,
                 "msg_count": self._msg_count,
             }
