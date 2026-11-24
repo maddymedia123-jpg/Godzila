@@ -39,6 +39,7 @@ class CommittedSignal:
     can_enter: bool = True
     status: str = "ACTIVE_TRACKING"
     squeeze_alert: str = ""
+    early_warning: str = ""
 
 
 class QuantEngine:
@@ -189,15 +190,38 @@ class QuantEngine:
             cvd += -qty if is_buyer_maker else qty
         return cvd
 
+    def detect_momentum_warning(self, imb: float, cvd_3m: float) -> Tuple[str, str]:
+        """
+        Early warning when bullish or bearish momentum is losing strength
+        (does not block or alter core framework signals).
+        """
+        h1_bias = self.tf_bias.get("1H", "CALIBRATING")
+        h4_bias = self.tf_bias.get("4H", "CALIBRATING")
+        rsi_1h = self.tf_rsi.get("1H", 50.0)
+        h1_str = self.tf_trend_strength.get("1H", 0.0)
+
+        if h1_bias == "BULLISH" or h4_bias == "BULLISH":
+            if (rsi_1h < 52.0 and imb < 0.05) or (h1_str < 0.22 and cvd_3m < 0):
+                return (
+                    "BULLISH_MOMENTUM_FADE",
+                    f"EARLY WARNING — BULLISH MOMENTUM EASING (1H RSI {rsi_1h:.1f}, Imb {imb:+.2f}, CVD {cvd_3m:+.1f})",
+                )
+
+        if h1_bias == "BEARISH" or h4_bias == "BEARISH":
+            if (rsi_1h > 48.0 and imb > -0.05) or (h1_str < 0.22 and cvd_3m > 0):
+                return (
+                    "BEARISH_MOMENTUM_FADE",
+                    f"EARLY WARNING — BEARISH MOMENTUM EASING (1H RSI {rsi_1h:.1f}, Imb {imb:+.2f}, CVD {cvd_3m:+.1f})",
+                )
+
+        return ("STEADY", "")
+
     def detect_squeeze_state(self, now: float, mid_price: float, imb: float, cvd_3m: float) -> Tuple[str, str]:
         """
-        High-threshold regime check so warnings only fire on genuine directional moves
-        and flat chop, without spamming noise on normal fluctuations.
+        Alerts on directional squeeze conditions without interfering with core framework logic.
         """
         h4_bias = self.tf_bias.get("4H", "CALIBRATING")
         h1_bias = self.tf_bias.get("1H", "CALIBRATING")
-        h4_str = self.tf_trend_strength.get("4H", 0.0)
-        h1_str = self.tf_trend_strength.get("1H", 0.0)
 
         closes_1h = self.tf_closes.get("1H", [])
         bounce_1h_pct = 0.0
@@ -214,39 +238,39 @@ class QuantEngine:
             net_move_pct = ((mid_price - anchor_px) / max(anchor_px, 1e-8)) * 100.0
 
         if (
-            net_move_pct > 0.85
-            and bounce_1h_pct > 1.60
-            and imb > 0.45
+            net_move_pct > 0.70
+            and bounce_1h_pct > 1.30
+            and imb > 0.35
             and cvd_3m > 0
             and (h4_bias == "BEARISH" or h1_bias == "BEARISH")
         ):
             return (
                 "SHORT_SQUEEZE_RISK",
-                f"SHORT SQUEEZE (UPWARD MOVE): +{bounce_1h_pct:.2f}% bounce, Imb {imb:+.2f}, CVD {cvd_3m:+.1f}",
+                f"SHORT SQUEEZE ALERT: +{bounce_1h_pct:.2f}% upward push, Imb {imb:+.2f}, CVD {cvd_3m:+.1f}",
             )
 
         if (
-            net_move_pct < -0.85
-            and drop_1h_pct > 1.60
-            and imb < -0.45
+            net_move_pct < -0.70
+            and drop_1h_pct > 1.30
+            and imb < -0.35
             and cvd_3m < 0
             and (h4_bias == "BULLISH" or h1_bias == "BULLISH")
         ):
             return (
                 "LONG_SQUEEZE_RISK",
-                f"LONG SQUEEZE (DOWNWARD MOVE): -{drop_1h_pct:.2f}% drop, Imb {imb:+.2f}, CVD {cvd_3m:+.1f}",
-            )
-
-        if h4_bias != "CALIBRATING" and h1_bias != "CALIBRATING" and h4_str < 0.20 and h1_str < 0.15:
-            return (
-                "NO_TREND_CHOP",
-                f"NO-TREND / CHOP: Flat EMA spread (4H {h4_str:.2f}%, 1H {h1_str:.2f}%)",
+                f"LONG SQUEEZE ALERT: -{drop_1h_pct:.2f}% downward move, Imb {imb:+.2f}, CVD {cvd_3m:+.1f}",
             )
 
         return ("NORMAL", "")
 
     def _refresh_signal_entry_gate(
-        self, sig: CommittedSignal, mid_price: float, squeeze_state: str, squeeze_msg: str
+        self,
+        sig: CommittedSignal,
+        mid_price: float,
+        squeeze_state: str,
+        squeeze_msg: str,
+        momentum_state: str,
+        momentum_msg: str,
     ) -> None:
         tp1_dist = abs(sig.tp1 - sig.entry_price)
         sl_dist = abs(sig.entry_price - sig.stop_loss)
@@ -259,6 +283,13 @@ class QuantEngine:
             sig.squeeze_alert = squeeze_msg
         else:
             sig.squeeze_alert = ""
+
+        if sig.direction == "LONG" and momentum_state == "BULLISH_MOMENTUM_FADE":
+            sig.early_warning = momentum_msg
+        elif sig.direction == "SHORT" and momentum_state == "BEARISH_MOMENTUM_FADE":
+            sig.early_warning = momentum_msg
+        else:
+            sig.early_warning = ""
 
         if sig.direction == "LONG":
             drift = mid_price - sig.entry_price
@@ -356,10 +387,13 @@ class QuantEngine:
 
         liq_stats = self._estimate_liquidation_clusters(mid_price, imbalance_t, w_bid, w_ask)
         squeeze_state, squeeze_msg = self.detect_squeeze_state(timestamp_sec, mid_price, imbalance_t, cvd_3m)
+        momentum_state, momentum_msg = self.detect_momentum_warning(imbalance_t, cvd_3m)
 
         for tf_key in ("4H", "1H"):
             for existing_sig in self.signals_by_tf[tf_key]:
-                self._refresh_signal_entry_gate(existing_sig, mid_price, squeeze_state, squeeze_msg)
+                self._refresh_signal_entry_gate(
+                    existing_sig, mid_price, squeeze_state, squeeze_msg, momentum_state, momentum_msg
+                )
 
         if scanner_active:
             for tf_key in ("4H", "1H"):
@@ -376,6 +410,7 @@ class QuantEngine:
                     student_balance,
                     squeeze_state,
                     squeeze_msg,
+                    momentum_msg,
                 )
 
         prioritized_signals = self.get_prioritized_signals()
@@ -395,6 +430,8 @@ class QuantEngine:
             "tf_atr": dict(self.tf_atr),
             "squeeze_state": squeeze_state,
             "squeeze_msg": squeeze_msg,
+            "momentum_state": momentum_state,
+            "momentum_msg": momentum_msg,
             "raw_bids": bids,
             "raw_asks": asks,
             "liq_stats": liq_stats,
@@ -461,6 +498,7 @@ class QuantEngine:
         balance: float,
         squeeze_state: str,
         squeeze_msg: str,
+        momentum_msg: str,
     ) -> None:
         bias = self.tf_bias.get(tf_label, "CALIBRATING")
         h4_bias = self.tf_bias.get("4H", "CALIBRATING")
@@ -479,17 +517,6 @@ class QuantEngine:
 
         direction = "LONG" if bias == "BULLISH" else "SHORT"
         three_tf_aligned = h4_bias == bias and d1_bias == bias
-
-        if direction == "SHORT" and squeeze_state == "SHORT_SQUEEZE_RISK":
-            self.status_by_tf[tf_label] = f"VETOED {tf_label} SHORT — {squeeze_msg}"
-            return
-        if direction == "LONG" and squeeze_state == "LONG_SQUEEZE_RISK":
-            self.status_by_tf[tf_label] = f"VETOED {tf_label} LONG — {squeeze_msg}"
-            return
-
-        if squeeze_state == "NO_TREND_CHOP":
-            self.status_by_tf[tf_label] = f"NO SIGNAL — {tf_label} BLOCKED BY NO-TREND / CHOP FILTER"
-            return
 
         if tf_label == "1H":
             if direction == "LONG" and (h4_bias != "BULLISH" or d1_bias == "BEARISH"):
@@ -602,6 +629,7 @@ class QuantEngine:
             can_enter=True,
             status="ACTIVE_TRACKING",
             squeeze_alert=squeeze_msg if squeeze_state != "NORMAL" else "",
+            early_warning=momentum_msg,
         )
 
         self.signals_by_tf[tf_label] = [sig]
