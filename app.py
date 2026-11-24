@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import streamlit as st
 
-import trend_paper
+from dino_partner import DinoPartner
 from stream_manager import BinanceFuturesStreamManager
 
 st.set_page_config(
@@ -102,6 +102,25 @@ st.markdown(
         font-weight: 800 !important;
         line-height: 1.7 !important;
     }
+    .gz-dino-sleep {
+        background-color: #090d14 !important;
+        border: 1px dashed #64748b !important;
+        border-radius: 8px !important;
+        padding: 10px 14px !important;
+        color: #cbd5e1 !important;
+        font-weight: 800 !important;
+        margin-bottom: 10px !important;
+    }
+    .gz-dino-awake {
+        background-color: #061524 !important;
+        border: 1px solid #38bdf8 !important;
+        border-radius: 8px !important;
+        padding: 12px 14px !important;
+        color: #ffffff !important;
+        font-weight: 700 !important;
+        margin-bottom: 10px !important;
+        line-height: 1.55 !important;
+    }
     .gz-dark-wrapper {
         background-color: #000000;
         color: #ffffff;
@@ -173,6 +192,14 @@ if "student_coin" not in st.session_state:
     st.session_state.student_coin = "BTCUSDT"
 if "student_balance" not in st.session_state:
     st.session_state.student_balance = 100.00
+if "dino_api_key" not in st.session_state:
+    st.session_state.dino_api_key = ""
+if "dino_model" not in st.session_state:
+    st.session_state.dino_model = "openrouter/free"
+if "dino_awake_signals" not in st.session_state:
+    st.session_state.dino_awake_signals = {}
+if "dino_latest_brief" not in st.session_state:
+    st.session_state.dino_latest_brief = None
 
 
 def fmt_px(val: float) -> str:
@@ -222,12 +249,26 @@ def build_audit_csv(rows: list) -> str:
     return buf.getvalue()
 
 
-def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int):
+def _invoke_dino(snap: dict, mode_label: str, target_id: str | None = None) -> dict:
+    brief = DinoPartner.run_on_demand(
+        snap=snap,
+        api_key=st.session_state.dino_api_key,
+        model=st.session_state.dino_model,
+        mode_label=mode_label,
+        target_id=target_id,
+    )
+    manager.save_dino_entry(brief)
+    st.session_state.dino_latest_brief = brief
+    return brief
+
+
+def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int, snap: dict):
     is_long = sig.direction == "LONG"
     dir_color = "#34d399" if is_long else "#f87171"
     rank_label = "PRIMARY PRIORITY SIGNAL (#1)" if rank_idx == 0 else f"SECONDARY QUALIFIED SIGNAL (#{rank_idx + 1})"
     rank_color = "#facc15" if rank_idx == 0 else "#38bdf8"
     sq_alert = getattr(sig, "squeeze_alert", "")
+    early_warn = getattr(sig, "early_warning", "")
 
     with st.container(border=True):
         st.markdown(
@@ -258,7 +299,12 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int):
 
         if sq_alert:
             st.markdown(
-                f"<div class='gz-blink-red' style='margin-bottom:12px;'><span class='gz-blink-dot'></span>{sq_alert}</div>",
+                f"<div class='gz-blink-red' style='margin-bottom:10px;'><span class='gz-blink-dot'></span>{sq_alert}</div>",
+                unsafe_allow_html=True,
+            )
+        if early_warn:
+            st.markdown(
+                f"<div style='color:#facc15;font-weight:800;margin-bottom:10px;'>⏳ {early_warn}</div>",
                 unsafe_allow_html=True,
             )
 
@@ -274,38 +320,71 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int):
             unsafe_allow_html=True,
         )
 
-        if st.button(
-            f"🔒 Lock [{sig.timeframe}] {sig.symbol} {sig.direction} into Active Trades",
-            key=f"commit_prio_{rank_idx}_{sig.signal_id}",
-        ):
-            trade_record = {
-                "trade_id": sig.signal_id,
-                "symbol": sig.symbol,
-                "direction": sig.direction,
-                "timeframe": sig.timeframe,
-                "entry_price": sig.entry_price,
-                "stop_loss": sig.stop_loss,
-                "tp1": sig.tp1,
-                "tp2": sig.tp2,
-                "tp3": sig.tp3,
-                "leverage": sig.leverage,
-                "margin_usd": sig.margin_required_usd,
-                "eta_tp1": sig.eta_tp1_str,
-                "eta_tp2": sig.eta_tp2_str,
-                "eta_tp3": sig.eta_tp3_str,
-                "alignment_status": sig.alignment_status,
-                "accuracy_score": sig.accuracy_score,
-                "squeeze_alert": sq_alert,
-                "committed_at": time.time(),
-            }
-            ok, msg = manager.commit_trade(trade_record)
-            if ok:
-                st.success(msg)
-            else:
-                st.error(msg)
+        # Dino on-demand state for this specific active signal
+        awake_map = st.session_state.dino_awake_signals
+        sig_dino = awake_map.get(sig.signal_id)
+        if sig_dino:
+            st.markdown(
+                f"<div class='gz-dino-awake'>"
+                f"<strong>🦖 Dino ({sig_dino.get('pkt_str','')}) · {sig_dino.get('mode_label','')}</strong><br/>"
+                f"{sig_dino.get('take','')}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div class='gz-dino-sleep'>💤 Dino is sleeping on this active signal — run Dino on demand when you want a partner read.</div>",
+                unsafe_allow_html=True,
+            )
+
+        act_c1, act_c2 = st.columns([2.2, 1.3])
+        with act_c1:
+            if st.button(
+                f"🔒 Lock [{sig.timeframe}] {sig.symbol} {sig.direction} into Active Trades",
+                key=f"commit_prio_{rank_idx}_{sig.signal_id}",
+            ):
+                trade_record = {
+                    "trade_id": sig.signal_id,
+                    "symbol": sig.symbol,
+                    "direction": sig.direction,
+                    "timeframe": sig.timeframe,
+                    "entry_price": sig.entry_price,
+                    "stop_loss": sig.stop_loss,
+                    "tp1": sig.tp1,
+                    "tp2": sig.tp2,
+                    "tp3": sig.tp3,
+                    "leverage": sig.leverage,
+                    "margin_usd": sig.margin_required_usd,
+                    "eta_tp1": sig.eta_tp1_str,
+                    "eta_tp2": sig.eta_tp2_str,
+                    "eta_tp3": sig.eta_tp3_str,
+                    "alignment_status": sig.alignment_status,
+                    "accuracy_score": sig.accuracy_score,
+                    "squeeze_alert": sq_alert,
+                    "committed_at": time.time(),
+                }
+                ok, msg = manager.commit_trade(trade_record)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+        with act_c2:
+            if st.button(
+                "🦖 Ask Dino About Signal",
+                key=f"ask_dino_sig_{rank_idx}_{sig.signal_id}",
+            ):
+                brief = _invoke_dino(snap, f"ACTIVE SIGNAL ({sig.symbol} {sig.direction})", target_id=sig.signal_id)
+                t_reads = brief.get("trade_reads", [])
+                take_txt = t_reads[0].get("partner_take", "") if t_reads else brief.get("market_partner_note", "")
+                st.session_state.dino_awake_signals[sig.signal_id] = {
+                    "pkt_str": brief.get("pkt_str", ""),
+                    "mode_label": brief.get("mode_label", ""),
+                    "take": take_txt,
+                }
+                st.rerun()
 
 
-def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str):
+def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str, snap: dict):
     if not trades_list:
         st.markdown(
             f"<div style='color:#ffffff;font-weight:700;'>No active {tab_prefix} trades locked in Godzilla Cloud yet.</div>",
@@ -483,6 +562,30 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
                     manager.kill_trade(t_id)
                     st.rerun()
 
+            # On-demand Dino partner check inside committed trade
+            if st.button("🦖 Dino Partner Check", key=f"dino_tr_{tab_prefix}_{t_id}"):
+                _invoke_dino(snap, f"COMMITTED TRADE ({t_sym} [{t_tf}] {t_dir})", target_id=t_id)
+                st.rerun()
+
+            matched_dino = None
+            for d_entry in snap.get("dino_memory", []):
+                for r in d_entry.get("trade_reads", []):
+                    if r.get("target_id") == t_id:
+                        matched_dino = (d_entry, r)
+                        break
+                if matched_dino:
+                    break
+
+            if matched_dino:
+                d_ent, d_read = matched_dino
+                st.markdown(
+                    f"<div class='gz-dino-awake' style='margin-top:8px;'>"
+                    f"<strong>🦖 Dino ({d_ent.get('pkt_str','')}) · {d_read.get('stance','WATCH_CLOSELY')} · Est: {d_read.get('win_prob_est','—')}</strong><br/>"
+                    f"{d_read.get('partner_take','')}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
             st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -507,11 +610,10 @@ with hdr_col3:
     st.write("")
     auto_refresh = st.toggle("⚡ Real-Time Stream (500ms)", value=True)
 
-tab_student, tab_pro, tab_vault, tab_trend = st.tabs([
+tab_student, tab_pro, tab_vault = st.tabs([
     "🎯 Godzilla Prioritized Signal Terminal (1H · 4H)",
     "🔬 Godzilla Order Book & Audit Terminal",
     "💾 Persistent Backtest & Accuracy Vault (Turso)",
-    "📈 Trend Paper Trade (Daily)",
 ])
 
 with tab_student:
@@ -564,12 +666,19 @@ with tab_student:
         audit_archive = snap.get("audit_archive", [])
         squeeze_state = metrics.get("squeeze_state", "NORMAL")
         squeeze_msg = metrics.get("squeeze_msg", "")
+        momentum_msg = metrics.get("momentum_msg", "")
         has_sl_in_active = any(t.get("sl_hit") or t.get("squeeze_alert") for t in active_trades)
 
         if squeeze_state != "NORMAL" or has_sl_in_active:
             alert_txt = squeeze_msg or "ACTIVE TRADE WARNING: STOP-LOSS OR SQUEEZE CONDITION DETECTED"
             st.markdown(
-                f"<div class='gz-blink-red' style='width:100%;margin-bottom:12px;'><span class='gz-blink-dot'></span>{alert_txt}</div>",
+                f"<div class='gz-blink-red' style='width:100%;margin-bottom:10px;'><span class='gz-blink-dot'></span>{alert_txt}</div>",
+                unsafe_allow_html=True,
+            )
+
+        if momentum_msg:
+            st.markdown(
+                f"<div style='color:#facc15;font-weight:800;margin-bottom:10px;'>⏳ {momentum_msg}</div>",
                 unsafe_allow_html=True,
             )
 
@@ -607,7 +716,7 @@ with tab_student:
         st.subheader(f"📡 Godzilla High-Accuracy Signal Queue — {coin}")
         if prioritized_signals:
             for idx, sig in enumerate(prioritized_signals):
-                render_prioritized_signal_card(sig, mid_price, idx)
+                render_prioritized_signal_card(sig, mid_price, idx, snap)
         else:
             st.markdown(
                 f"""
@@ -632,13 +741,68 @@ with tab_student:
         ])
 
         with act_tab_all:
-            render_active_trades_table(active_trades, tickers, "ALL")
+            render_active_trades_table(active_trades, tickers, "ALL", snap)
 
         with act_tab_1h:
-            render_active_trades_table(trades_1h, tickers, "1H")
+            render_active_trades_table(trades_1h, tickers, "1H", snap)
 
         with act_tab_4h:
-            render_active_trades_table(trades_4h, tickers, "4H")
+            render_active_trades_table(trades_4h, tickers, "4H", snap)
+
+        # On-Demand Dino Partner Console (Reads logs + past Dino summaries + saves to Turso)
+        st.markdown("---")
+        st.subheader("🦖 Dino — On-Demand Trading Partner (OpenRouter + Turso Memory)")
+
+        dk1, dk2, dk3 = st.columns([2.0, 1.4, 1.2])
+        with dk1:
+            key_in = st.text_input(
+                "OpenRouter API Key (or set in Secrets/Env)",
+                value=st.session_state.dino_api_key,
+                type="password",
+                placeholder="sk-or-v1-...",
+            )
+            st.session_state.dino_api_key = key_in
+        with dk2:
+            model_in = st.text_input(
+                "OpenRouter Model ID",
+                value=st.session_state.dino_model,
+                placeholder="openrouter/free",
+            )
+            st.session_state.dino_model = model_in
+        with dk3:
+            st.write("")
+            if st.button("🦖 Wake Dino & Review Now"):
+                _invoke_dino(snap, f"FULL PARTNER REVIEW ({coin})", target_id=None)
+                st.rerun()
+
+        latest_brief = st.session_state.dino_latest_brief or (
+            snap.get("dino_memory", [None])[0] if snap.get("dino_memory") else None
+        )
+        if latest_brief:
+            st.markdown(
+                f"<div class='gz-dino-awake'>"
+                f"<strong>🦖 Dino ({latest_brief.get('pkt_str','')}) · {latest_brief.get('mode_label','')}</strong><br/>"
+                f"{latest_brief.get('market_partner_note','')}<br/><br/>"
+                f"<span style='color:#facc15;font-weight:800;'>🧠 Memory Correlation:</span> {latest_brief.get('memory_improvement_note','')}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            for tr_r in latest_brief.get("trade_reads", []):
+                st.markdown(
+                    f"<div class='gz-row-container'>"
+                    f"<strong>{tr_r.get('label','')}</strong> · <span style='color:#38bdf8;font-weight:900;'>{tr_r.get('stance','')}</span> · "
+                    f"Est: <span style='color:#34d399;font-weight:900;'>{tr_r.get('win_prob_est','—')}</span><br/>"
+                    f"<div style='margin-top:6px;color:#ffffff;font-weight:700;'>{tr_r.get('partner_take','')}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            with st.expander("📲 Ready-to-Send Bot Message Payload"):
+                st.code(latest_brief.get("bot_message", ""), language="text")
+        else:
+            st.markdown(
+                "<div class='gz-dino-sleep'>💤 Dino is sleeping — click 'Wake Dino & Review Now' or ask Dino on any trade/signal when you want partner guidance.</div>",
+                unsafe_allow_html=True,
+            )
 
         st.markdown("---")
         st.subheader(f"📚 Godzilla Automatic Signal Audit Logbook ({len(audit_archive)} Tracked Bot Signals)")
@@ -657,11 +821,12 @@ with tab_student:
             )
         with dl_col2:
             st.download_button(
-                "⬇️ Export Full Backtest + Audit JSON",
+                "⬇️ Export Full Backtest + Audit + Dino JSON",
                 data=json.dumps({
                     "audit_archive": audit_archive,
                     "backtest_snapshots": snap.get("backtest_snapshots", []),
                     "audit_reviews": snap.get("audit_reviews", []),
+                    "dino_memory": snap.get("dino_memory", []),
                 }, indent=2),
                 file_name="godzilla_full_backup.json",
                 mime="application/json",
@@ -860,14 +1025,28 @@ with tab_vault:
             st.rerun()
 
     st.markdown("---")
+    st.markdown("### 🦖 Saved Dino Partner Summaries & Memory History")
+    dino_hist = v_snap.get("dino_memory", [])
+    if dino_hist:
+        for d_item in dino_hist[:15]:
+            st.markdown(
+                f"<div class='gz-dino-awake'>"
+                f"<strong>{d_item.get('pkt_str','')} · {d_item.get('symbol','')} · {d_item.get('mode_label','')}</strong><br/>"
+                f"{d_item.get('market_partner_note','')}<br/>"
+                f"<span style='color:#facc15;'>Memory Note: {d_item.get('memory_improvement_note','')}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+    else:
+        st.markdown("<div style='color:#ffffff;font-weight:700;'>No Dino summaries saved yet.</div>", unsafe_allow_html=True)
+
+    st.markdown("---")
     st.markdown("### 📋 Copy-Paste Ready Stored Data (For Future Framework Updates)")
     combined_export = json.dumps({
         "db_status": v_snap.get("db_status", ""),
         "backtest_snapshots": v_snap.get("backtest_snapshots", []),
         "audit_reviews": v_snap.get("audit_reviews", []),
+        "dino_memory": dino_hist[:20],
         "recent_audit_archive": all_audits[:50],
     }, indent=2)
     st.code(combined_export, language="json")
-
-with tab_trend:
-    trend_paper.render()
