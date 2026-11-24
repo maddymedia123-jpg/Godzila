@@ -60,6 +60,25 @@ st.markdown(
         color: #ffffff !important;
         font-weight: 700 !important;
     }
+    /* Fix white background / white text on expanders and inputs */
+    [data-testid="stExpander"],
+    [data-testid="stExpander"] > details,
+    [data-testid="stExpander"] summary,
+    [data-testid="stExpanderDetails"] {
+        background-color: #070e16 !important;
+        color: #ffffff !important;
+        border-color: #1e3a5f !important;
+    }
+    [data-testid="stExpander"] summary span,
+    [data-testid="stExpander"] summary p {
+        color: #38bdf8 !important;
+        font-weight: 800 !important;
+    }
+    input, textarea, [data-baseweb="input"] > div, [data-baseweb="textarea"] > div {
+        background-color: #0b131e !important;
+        color: #ffffff !important;
+        border-color: #25415e !important;
+    }
     .stMetric {
         background-color: #070c12 !important;
         padding: 14px 16px !important;
@@ -196,8 +215,8 @@ if "dino_api_key" not in st.session_state:
     st.session_state.dino_api_key = ""
 if "dino_model" not in st.session_state:
     st.session_state.dino_model = "openrouter/free"
-if "dino_awake_signals" not in st.session_state:
-    st.session_state.dino_awake_signals = {}
+if "dino_sync_epoch" not in st.session_state:
+    st.session_state.dino_sync_epoch = 0
 if "dino_latest_brief" not in st.session_state:
     st.session_state.dino_latest_brief = None
 
@@ -249,17 +268,31 @@ def build_audit_csv(rows: list) -> str:
     return buf.getvalue()
 
 
-def _invoke_dino(snap: dict, mode_label: str, target_id: str | None = None) -> dict:
-    brief = DinoPartner.run_on_demand(
+def _invoke_dino_all(snap: dict, mode_label: str) -> dict:
+    """Single run updates all active signals, all committed trades, and Dino memory in Turso."""
+    brief = DinoPartner.run_all_on_demand(
         snap=snap,
         api_key=st.session_state.dino_api_key,
         model=st.session_state.dino_model,
         mode_label=mode_label,
-        target_id=target_id,
     )
-    manager.save_dino_entry(brief)
+    if hasattr(manager, "save_dino_entry"):
+        manager.save_dino_entry(brief)
+    else:
+        with manager._lock:
+            manager.dino_memory.insert(0, brief)
+            manager._save_portfolio_to_turso()
+
     st.session_state.dino_latest_brief = brief
+    st.session_state.dino_sync_epoch = time.time()
     return brief
+
+
+def _get_current_dino_brief(snap: dict) -> dict | None:
+    if st.session_state.dino_latest_brief:
+        return st.session_state.dino_latest_brief
+    mem = snap.get("dino_memory", [])
+    return mem[0] if mem else None
 
 
 def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int, snap: dict):
@@ -320,20 +353,23 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int, snap: d
             unsafe_allow_html=True,
         )
 
-        # Dino on-demand state for this specific active signal
-        awake_map = st.session_state.dino_awake_signals
-        sig_dino = awake_map.get(sig.signal_id)
-        if sig_dino:
-            st.markdown(
-                f"<div class='gz-dino-awake'>"
-                f"<strong>🦖 Dino ({sig_dino.get('pkt_str','')}) · {sig_dino.get('mode_label','')}</strong><br/>"
-                f"{sig_dino.get('take','')}"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+        brief = _get_current_dino_brief(snap)
+        matched_oneliner = None
+        if brief and st.session_state.dino_sync_epoch > 0:
+            for item in brief.get("active_signal_oneliners", []):
+                if item.get("target_id") == sig.signal_id or item.get("label") == f"{sig.symbol} [{sig.timeframe}] {sig.direction}":
+                    matched_oneliner = item
+                    break
+
+        if matched_oneliner:
+            with st.expander(f"🦖 Dino One-Liner ({matched_oneliner.get('stance','WATCH')} · Est {matched_oneliner.get('win_prob_est','—')})", expanded=True):
+                st.markdown(
+                    f"<div style='color:#ffffff;font-weight:700;'>{matched_oneliner.get('oneliner','')}</div>",
+                    unsafe_allow_html=True,
+                )
         else:
             st.markdown(
-                "<div class='gz-dino-sleep'>💤 Dino is sleeping on this active signal — run Dino on demand when you want a partner read.</div>",
+                "<div class='gz-dino-sleep'>💤 Dino is sleeping on active signals until you run Dino on demand.</div>",
                 unsafe_allow_html=True,
             )
 
@@ -370,17 +406,10 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int, snap: d
                     st.error(msg)
         with act_c2:
             if st.button(
-                "🦖 Ask Dino About Signal",
+                "🦖 Run Dino (All Sync)",
                 key=f"ask_dino_sig_{rank_idx}_{sig.signal_id}",
             ):
-                brief = _invoke_dino(snap, f"ACTIVE SIGNAL ({sig.symbol} {sig.direction})", target_id=sig.signal_id)
-                t_reads = brief.get("trade_reads", [])
-                take_txt = t_reads[0].get("partner_take", "") if t_reads else brief.get("market_partner_note", "")
-                st.session_state.dino_awake_signals[sig.signal_id] = {
-                    "pkt_str": brief.get("pkt_str", ""),
-                    "mode_label": brief.get("mode_label", ""),
-                    "take": take_txt,
-                }
+                _invoke_dino_all(snap, f"ALL-SYNC FROM SIGNAL ({sig.symbol} {sig.direction})")
                 st.rerun()
 
 
@@ -391,6 +420,15 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
             unsafe_allow_html=True,
         )
         return
+
+    brief = _get_current_dino_brief(snap)
+    trade_reads_map = {}
+    if brief:
+        for r in brief.get("committed_trade_reads", []):
+            if r.get("target_id"):
+                trade_reads_map[r.get("target_id")] = r
+            if r.get("label"):
+                trade_reads_map[r.get("label")] = r
 
     st.markdown('<div class="gz-dark-wrapper">', unsafe_allow_html=True)
     st.markdown(
@@ -562,29 +600,28 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
                     manager.kill_trade(t_id)
                     st.rerun()
 
-            # On-demand Dino partner check inside committed trade
-            if st.button("🦖 Dino Partner Check", key=f"dino_tr_{tab_prefix}_{t_id}"):
-                _invoke_dino(snap, f"COMMITTED TRADE ({t_sym} [{t_tf}] {t_dir})", target_id=t_id)
-                st.rerun()
-
-            matched_dino = None
-            for d_entry in snap.get("dino_memory", []):
-                for r in d_entry.get("trade_reads", []):
-                    if r.get("target_id") == t_id:
-                        matched_dino = (d_entry, r)
-                        break
-                if matched_dino:
-                    break
-
-            if matched_dino:
-                d_ent, d_read = matched_dino
-                st.markdown(
-                    f"<div class='gz-dino-awake' style='margin-top:8px;'>"
-                    f"<strong>🦖 Dino ({d_ent.get('pkt_str','')}) · {d_read.get('stance','WATCH_CLOSELY')} · Est: {d_read.get('win_prob_est','—')}</strong><br/>"
-                    f"{d_read.get('partner_take','')}"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
+            # Collapsible Dino Brief + Layman Summary (updates all trades & signals in 1 run)
+            matched_tr = trade_reads_map.get(t_id) or trade_reads_map.get(f"{t_sym} [{t_tf}] {t_dir}")
+            exp_title = (
+                f"🦖 Dino Brief & Layman Summary ({matched_tr.get('stance','WATCH')} · Est {matched_tr.get('win_prob_est','—')})"
+                if matched_tr
+                else "🦖 Dino Brief & Layman Summary (Click to Expand / Run Dino)"
+            )
+            with st.expander(exp_title, expanded=bool(matched_tr)):
+                if matched_tr:
+                    st.markdown(
+                        f"<div style='color:#38bdf8;font-weight:800;margin-bottom:6px;'>Brief: {matched_tr.get('brief_summary','')}</div>"
+                        f"<div style='color:#ffffff;font-weight:700;'>Layman: {matched_tr.get('layman_summary','')}</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        "<div style='color:#cbd5e1;font-weight:700;'>No Dino run yet for this trade. Click below to sync all committed trades, active signals, and logs at once.</div>",
+                        unsafe_allow_html=True,
+                    )
+                if st.button("🦖 Run Dino (Updates Everything)", key=f"dino_tr_{tab_prefix}_{t_id}"):
+                    _invoke_dino_all(snap, f"ALL-SYNC FROM TRADE ({t_sym} [{t_tf}] {t_dir})")
+                    st.rerun()
 
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -749,11 +786,11 @@ with tab_student:
         with act_tab_4h:
             render_active_trades_table(trades_4h, tickers, "4H", snap)
 
-        # On-Demand Dino Partner Console (Reads logs + past Dino summaries + saves to Turso)
+        # Single-Pass On-Demand Dino Partner Console
         st.markdown("---")
-        st.subheader("🦖 Dino — On-Demand Trading Partner (OpenRouter + Turso Memory)")
+        st.subheader("🦖 Dino — Single-Run Partner Sync (Committed + Active Signals + Turso Memory)")
 
-        dk1, dk2, dk3 = st.columns([2.0, 1.4, 1.2])
+        dk1, dk2, dk3 = st.columns([2.0, 1.4, 1.3])
         with dk1:
             key_in = st.text_input(
                 "OpenRouter API Key (or set in Secrets/Env)",
@@ -771,36 +808,22 @@ with tab_student:
             st.session_state.dino_model = model_in
         with dk3:
             st.write("")
-            if st.button("🦖 Wake Dino & Review Now"):
-                _invoke_dino(snap, f"FULL PARTNER REVIEW ({coin})", target_id=None)
+            if st.button("🦖 Run Dino Now (All-In-One)"):
+                _invoke_dino_all(snap, f"FULL ALL-IN-ONE SYNC ({coin})")
                 st.rerun()
 
-        latest_brief = st.session_state.dino_latest_brief or (
-            snap.get("dino_memory", [None])[0] if snap.get("dino_memory") else None
-        )
+        latest_brief = _get_current_dino_brief(snap)
         if latest_brief:
-            st.markdown(
-                f"<div class='gz-dino-awake'>"
-                f"<strong>🦖 Dino ({latest_brief.get('pkt_str','')}) · {latest_brief.get('mode_label','')}</strong><br/>"
-                f"{latest_brief.get('market_partner_note','')}<br/><br/>"
-                f"<span style='color:#facc15;font-weight:800;'>🧠 Memory Correlation:</span> {latest_brief.get('memory_improvement_note','')}"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            for tr_r in latest_brief.get("trade_reads", []):
+            with st.expander(f"🦖 Dino Latest Partner Summary ({latest_brief.get('pkt_str','')})", expanded=True):
                 st.markdown(
-                    f"<div class='gz-row-container'>"
-                    f"<strong>{tr_r.get('label','')}</strong> · <span style='color:#38bdf8;font-weight:900;'>{tr_r.get('stance','')}</span> · "
-                    f"Est: <span style='color:#34d399;font-weight:900;'>{tr_r.get('win_prob_est','—')}</span><br/>"
-                    f"<div style='margin-top:6px;color:#ffffff;font-weight:700;'>{tr_r.get('partner_take','')}</div>"
-                    f"</div>",
+                    f"<div style='color:#ffffff;font-weight:700;'>{latest_brief.get('market_summary','')}</div>",
                     unsafe_allow_html=True,
                 )
-            with st.expander("📲 Ready-to-Send Bot Message Payload"):
+            with st.expander("📲 Bot-Ready Summary Payload"):
                 st.code(latest_brief.get("bot_message", ""), language="text")
         else:
             st.markdown(
-                "<div class='gz-dino-sleep'>💤 Dino is sleeping — click 'Wake Dino & Review Now' or ask Dino on any trade/signal when you want partner guidance.</div>",
+                "<div class='gz-dino-sleep'>💤 Dino is sleeping — one click on 'Run Dino Now' updates all active signals, committed trades, and memory together.</div>",
                 unsafe_allow_html=True,
             )
 
@@ -1029,14 +1052,12 @@ with tab_vault:
     dino_hist = v_snap.get("dino_memory", [])
     if dino_hist:
         for d_item in dino_hist[:15]:
-            st.markdown(
-                f"<div class='gz-dino-awake'>"
-                f"<strong>{d_item.get('pkt_str','')} · {d_item.get('symbol','')} · {d_item.get('mode_label','')}</strong><br/>"
-                f"{d_item.get('market_partner_note','')}<br/>"
-                f"<span style='color:#facc15;'>Memory Note: {d_item.get('memory_improvement_note','')}</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+            with st.expander(f"{d_item.get('pkt_str','')} · {d_item.get('symbol','')} · {d_item.get('mode_label','')}", expanded=False):
+                st.markdown(
+                    f"<div style='color:#ffffff;font-weight:700;'>{d_item.get('market_summary','')}</div>"
+                    f"<div style='color:#facc15;font-weight:700;margin-top:6px;'>Internal Correlation: {d_item.get('self_improvement_note','')}</div>",
+                    unsafe_allow_html=True,
+                )
     else:
         st.markdown("<div style='color:#ffffff;font-weight:700;'>No Dino summaries saved yet.</div>", unsafe_allow_html=True)
 
