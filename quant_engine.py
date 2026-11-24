@@ -191,10 +191,6 @@ class QuantEngine:
         return cvd
 
     def detect_momentum_warning(self, imb: float, cvd_3m: float) -> Tuple[str, str]:
-        """
-        Early warning when bullish or bearish momentum is losing strength
-        (does not block or alter core framework signals).
-        """
         h1_bias = self.tf_bias.get("1H", "CALIBRATING")
         h4_bias = self.tf_bias.get("4H", "CALIBRATING")
         rsi_1h = self.tf_rsi.get("1H", 50.0)
@@ -217,9 +213,6 @@ class QuantEngine:
         return ("STEADY", "")
 
     def detect_squeeze_state(self, now: float, mid_price: float, imb: float, cvd_3m: float) -> Tuple[str, str]:
-        """
-        Alerts on directional squeeze conditions without interfering with core framework logic.
-        """
         h4_bias = self.tf_bias.get("4H", "CALIBRATING")
         h1_bias = self.tf_bias.get("1H", "CALIBRATING")
 
