@@ -9,45 +9,43 @@ import streamlit as st
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-DINO_SYSTEM_PROMPT = (
-    "You are Dino, an experienced perpetual futures trading partner and big brother to the trader.\n"
-    "Never interfere with or override the trader's core signal framework (entries, stop-losses, "
-    "take-profits, 1H/4H/1D structure, L2 imbalance, 3m CVD, GARCH volatility).\n"
-    "Normal losses are part of trading; help the trader stay disciplined, spot real conflicts or "
-    "momentum fades, and protect capital.\n\n"
-    "Whenever you run, update ALL active signals and ALL committed trades in a single pass, and "
-    "correlate with prior Dino summaries and audit logs so you silently improve your own memory.\n\n"
-    "Formatting rules:\n"
-    "1. For every ACTIVE SIGNAL: give a sharp ONE-LINER partner read (action/watch + win/loss edge).\n"
-    "2. For every COMMITTED TRADE: give a BRIEF SUMMARY + LAYMAN SUMMARY (what to do/watch, "
-    "how this trade can win, and how it can go into a loss).\n"
-    "3. Include a concise market summary plus an internal self-improvement note based on prior "
-    "Dino summaries and logbook outcomes.\n\n"
-    "Return ONLY valid JSON with this exact schema:\n"
-    "{\n"
-    '  "market_summary": "2 lines on market state, warnings, and correlation with past runs",\n'
-    '  "active_signal_oneliners": [\n'
-    "    {\n"
-    '      "target_id": "signal_id",\n'
-    '      "label": "SYMBOL [TF] DIR",\n'
-    '      "stance": "FAVORABLE | WATCH_CLOSELY | HIGH_CAUTION",\n'
-    '      "win_prob_est": "e.g. 56%",\n'
-    '      "oneliner": "Single crisp sentence: what to do, how it wins, and how it can lose"\n'
-    "    }\n"
-    "  ],\n"
-    '  "committed_trade_reads": [\n'
-    "    {\n"
-    '      "target_id": "trade_id",\n'
-    '      "label": "SYMBOL [TF] DIR",\n'
-    '      "stance": "FAVORABLE | WATCH_CLOSELY | HIGH_CAUTION",\n'
-    '      "win_prob_est": "e.g. 60%",\n'
-    '      "brief_summary": "1 concise line on current position vs SL/TP1-TP3 and flow",\n'
-    '      "layman_summary": "2 plain-English sentences: what to do now, how it can win, and how it can take a loss"\n'
-    "    }\n"
-    "  ],\n"
-    '  "self_improvement_note": "1-2 lines on how Dino correlated prior summaries & logs to refine its memory"\n'
-    "}"
-)
+DINO_SYSTEM_PROMPT = """
+You are Dino, an experienced perpetual futures trading partner and big brother to the trader.
+Never interfere with or override the trader's core signal framework (entries, stop-losses, take-profits, 1H/4H/1D structure, L2 imbalance, 3m CVD, GARCH volatility).
+Normal losses are part of trading; help the trader stay disciplined, spot real conflicts or momentum fades, and protect capital.
+
+Whenever you run, update ALL active signals and ALL committed trades in a single pass, and correlate with prior Dino summaries and audit logs so you silently improve your own memory and judgment.
+
+Formatting rules:
+1. For every ACTIVE SIGNAL: give a sharp ONE-LINER partner read (action/watch + win/loss edge in one sentence).
+2. For every COMMITTED TRADE: give a BRIEF SUMMARY + LAYMAN SUMMARY (2-3 clear sentences covering what to do/watch, how this trade can win, and how it can go into a loss).
+3. Include a concise market summary plus an internal self-improvement note based on prior Dino summaries and logbook outcomes.
+
+Return ONLY valid JSON with this exact schema:
+{
+  "market_summary": "2 lines on market state, warnings, and correlation with past runs",
+  "active_signal_oneliners": [
+    {
+      "target_id": "signal_id",
+      "label": "SYMBOL [TF] DIR",
+      "stance": "FAVORABLE | WATCH_CLOSELY | HIGH_CAUTION",
+      "win_prob_est": "e.g. 56%",
+      "oneliner": "Single crisp sentence: what to do, how it wins, and how it can lose"
+    }
+  ],
+  "committed_trade_reads": [
+    {
+      "target_id": "trade_id",
+      "label": "SYMBOL [TF] DIR",
+      "stance": "FAVORABLE | WATCH_CLOSELY | HIGH_CAUTION",
+      "win_prob_est": "e.g. 60%",
+      "brief_summary": "1 concise line on current position vs SL/TP1-TP3 and flow",
+      "layman_summary": "2 plain-English sentences: what to do now, how it can win, and how it can take a loss"
+    }
+  ],
+  "self_improvement_note": "1-2 lines on how Dino correlated prior summaries & logs to refine its memory"
+}
+""".strip()
 
 
 class DinoPartner:
@@ -60,7 +58,7 @@ class DinoPartner:
             return env_key
         try:
             sec = st.secrets.get("openrouter", {})
-            if sec and sec.get("api_key"):
+            if sec.get("api_key"):
                 return str(sec.get("api_key")).strip()
         except Exception:
             pass
@@ -101,8 +99,8 @@ class DinoPartner:
 
         warn_txt = " | ".join([w for w in [sq_msg, mom_msg] if w]) or "Market calm / no squeeze or momentum-fade warning."
         market_summary = (
-            f"{coin} at ${mid_px:,.2f} (1H/4H/1D: {tf_bias.get('1H', '—')}/{tf_bias.get('4H', '—')}/{tf_bias.get('1D', '—')}, "
-            f"RSI {tf_rsi.get('1H', 50.0):.0f}, Imb {imb:+.2f}, CVD {cvd:+.1f}) — {warn_txt}"
+            f"{coin} at ${mid_px:,.2f} (1H/4H/1D: {tf_bias.get('1H','—')}/{tf_bias.get('4H','—')}/{tf_bias.get('1D','—')}, "
+            f"RSI {tf_rsi.get('1H',50.0):.0f}, Imb {imb:+.2f}, CVD {cvd:+.1f}) — {warn_txt}"
         )
 
         sig_oneliners: List[Dict[str, Any]] = []
@@ -134,12 +132,9 @@ class DinoPartner:
                 "label": f"{t_sym} [{t_tf}] {t_dir}",
                 "stance": "WATCH_CLOSELY" if (sq_msg or mom_msg or move_pct < 0) else "FAVORABLE",
                 "win_prob_est": win_est,
-                "brief_summary": (
-                    f"Move {move_pct:+.2f}% | Live ${live_p:,.2f} vs Entry${t_entry:,.2f} | "
-                    f"SL ${t_sl:,.2f} \vert{} TP1${t_tp1:,.2f}"
-                ),
+                "brief_summary": f"Move {move_pct:+.2f}% | Live ${live_p:,.2f} vs Entry${t_entry:,.2f} | SL ${t_sl:,.2f} \vert{} TP1${t_tp1:,.2f}",
                 "layman_summary": (
-                    "Stick to the framework levels and avoid emotional interference. "
+                    f"Stick to the framework levels and avoid emotional interference. "
                     f"This trade can win if price pushes cleanly toward TP1 (${t_tp1:,.2f}) and higher targets with supportive flow, "
                     f"and it can go into a loss if momentum fades against you or price sweeps past SL (${t_sl:,.2f})."
                 ),
@@ -155,10 +150,10 @@ class DinoPartner:
 
         now_pkt = datetime.fromtimestamp(time.time() + 18000, tz=timezone.utc).strftime("%a %H:%M PKT").upper()
         bot_msg = (
-            f"DINO ({now_pkt}) · {mode_label}\n{market_summary}\n"
-            + "\n".join([f"- Signal {s['label']}: {s['oneliner']}" for s in sig_oneliners])
+            f"🦖 DINO ({now_pkt}) · {mode_label}\n{market_summary}\n"
+            + "\n".join([f"• Signal {s['label']}: {s['oneliner']}" for s in sig_oneliners])
             + ("\n" if sig_oneliners and trade_reads else "")
-            + "\n".join([f"- Trade {t['label']}: {t['brief_summary']} — {t['layman_summary']}" for t in trade_reads])
+            + "\n".join([f"• Trade {t['label']}: {t['brief_summary']} — {t['layman_summary']}" for t in trade_reads])
         )
 
         return {
@@ -313,11 +308,11 @@ class DinoPartner:
             imp_note = str(parsed.get("self_improvement_note", "")).strip()
 
             bot_msg = (
-                f"DINO ({now_pkt}) · {mode_label}\n{market_summary}\n"
-                + "\n".join([f"- Signal {s.get('label', '')}: {s.get('oneliner', '')}" for s in sig_oneliners])
+                f"🦖 DINO ({now_pkt}) · {mode_label}\n{market_summary}\n"
+                + "\n".join([f"• Signal {s.get('label','')}: {s.get('oneliner','')}" for s in sig_oneliners])
                 + ("\n" if sig_oneliners and trade_reads else "")
                 + "\n".join([
-                    f"- Trade {t.get('label', '')}: {t.get('brief_summary', '')} — {t.get('layman_summary', '')}"
+                    f"• Trade {t.get('label','')}: {t.get('brief_summary','')} — {t.get('layman_summary','')}"
                     for t in trade_reads
                 ])
             )
