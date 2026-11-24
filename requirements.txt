@@ -7,3 +7,4 @@ scipy
 arch
 plotly
 libsql-client
+requests
