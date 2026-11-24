@@ -60,7 +60,6 @@ st.markdown(
         color: #ffffff !important;
         font-weight: 700 !important;
     }
-    /* High-contrast dark styling for expanders, buttons, and inputs */
     [data-testid="stExpander"],
     [data-testid="stExpander"] > details,
     [data-testid="stExpander"] summary,
@@ -136,16 +135,6 @@ st.markdown(
         font-weight: 800 !important;
         margin-bottom: 10px !important;
     }
-    .gz-dino-awake {
-        background-color: #061524 !important;
-        border: 1px solid #38bdf8 !important;
-        border-radius: 8px !important;
-        padding: 12px 14px !important;
-        color: #ffffff !important;
-        font-weight: 700 !important;
-        margin-bottom: 10px !important;
-        line-height: 1.55 !important;
-    }
     .gz-dark-wrapper {
         background-color: #000000;
         color: #ffffff;
@@ -204,13 +193,15 @@ def get_stream_manager():
 
 manager = get_stream_manager()
 
-ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
+ASSETS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "TAOUSDT", "AAVEUSDT"]
 COIN_BADGES = {
     "BTCUSDT": ("₿", "#facc15"),
     "ETHUSDT": ("Ξ", "#38bdf8"),
     "SOLUSDT": ("◎", "#34d399"),
     "XRPUSDT": ("✕", "#22d3ee"),
     "DOGEUSDT": ("Ð", "#fbbf24"),
+    "TAOUSDT": ("τ", "#c084fc"),
+    "AAVEUSDT": ("👻", "#38bdf8"),
 }
 
 if "student_coin" not in st.session_state:
@@ -275,7 +266,6 @@ def build_audit_csv(rows: list) -> str:
 
 
 def _invoke_dino_all(snap: dict, mode_label: str) -> dict:
-    """Single run updates all active signals, all committed trades, and Dino memory in Turso."""
     brief = DinoPartner.run_all_on_demand(
         snap=snap,
         api_key=st.session_state.dino_api_key,
@@ -370,14 +360,14 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int, snap: d
                     break
 
         if matched_oneliner:
-            with st.expander(f"🦖 Dino One-Liner ({matched_oneliner.get('stance','WATCH')} · Est {matched_oneliner.get('win_prob_est','—')})", expanded=True):
+            with st.expander(f"🦖 Dino Call ({matched_oneliner.get('call','GOOD TO GO')})", expanded=True):
                 st.markdown(
                     f"<div style='color:#ffffff;font-weight:700;'>{matched_oneliner.get('oneliner','')}</div>",
                     unsafe_allow_html=True,
                 )
         else:
             st.markdown(
-                "<div class='gz-dino-sleep'>💤 Dino is sleeping on active signals until you run Dino on demand.</div>",
+                "<div class='gz-dino-sleep'>💤 Dino is sleeping on active signals until you run Dino.</div>",
                 unsafe_allow_html=True,
             )
 
@@ -417,7 +407,7 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int, snap: d
                 "🦖 Run Dino (All Sync)",
                 key=f"ask_dino_sig_{rank_idx}_{sig.signal_id}",
             ):
-                _invoke_dino_all(snap, f"ALL-SYNC FROM SIGNAL ({sig.symbol} {sig.direction})")
+                _invoke_dino_all(snap, f"ALL-SYNC ({sig.symbol} {sig.direction})")
                 st.rerun()
 
 
@@ -610,24 +600,23 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
             matched_tr = trade_reads_map.get(t_id) or trade_reads_map.get(f"{t_sym} [{t_tf}] {t_dir}")
             exp_title = (
-                f"🦖 Dino Brief & Layman Summary ({matched_tr.get('stance','WATCH')} · Est {matched_tr.get('win_prob_est','—')})"
+                f"🦖 Dino Desk Check-In · {matched_tr.get('call','GOOD TO GO')}"
                 if matched_tr
-                else "🦖 Dino Brief & Layman Summary (Click to Expand / Run Dino)"
+                else "🦖 Dino Desk Check-In (Click to Expand / Run Dino)"
             )
             with st.expander(exp_title, expanded=bool(matched_tr)):
                 if matched_tr:
                     st.markdown(
-                        f"<div style='color:#38bdf8;font-weight:800;margin-bottom:6px;'>Brief: {matched_tr.get('brief_summary','')}</div>"
-                        f"<div style='color:#ffffff;font-weight:700;'>Layman: {matched_tr.get('layman_summary','')}</div>",
+                        f"<div style='color:#ffffff;font-weight:700;line-height:1.6;'>{matched_tr.get('paragraph','')}</div>",
                         unsafe_allow_html=True,
                     )
                 else:
                     st.markdown(
-                        "<div style='color:#cbd5e1;font-weight:700;'>No Dino run yet for this trade. Click below to sync all committed trades, active signals, and logs at once.</div>",
+                        "<div style='color:#cbd5e1;font-weight:700;'>No Dino check-in yet. One click updates all committed trades, active signals, and logs together.</div>",
                         unsafe_allow_html=True,
                     )
                 if st.button("🦖 Run Dino (Updates Everything)", key=f"dino_tr_{tab_prefix}_{t_id}"):
-                    _invoke_dino_all(snap, f"ALL-SYNC FROM TRADE ({t_sym} [{t_tf}] {t_dir})")
+                    _invoke_dino_all(snap, f"ALL-SYNC ({t_sym} [{t_tf}] {t_dir})")
                     st.rerun()
 
             st.markdown("</div>", unsafe_allow_html=True)
@@ -661,7 +650,7 @@ tab_student, tab_pro, tab_vault = st.tabs([
 ])
 
 with tab_student:
-    ctrl_col1, ctrl_col2 = st.columns([2.2, 1.3])
+    ctrl_col1, ctrl_col2 = st.columns([2.4, 1.1])
     with ctrl_col1:
         selected_coin = st.radio(
             "Select Perpetual Asset to Scan",
@@ -820,9 +809,9 @@ with tab_student:
 
         latest_brief = _get_current_dino_brief(snap)
         if latest_brief:
-            with st.expander(f"🦖 Dino Latest Partner Summary ({latest_brief.get('pkt_str','')})", expanded=True):
+            with st.expander(f"🦖 Dino Latest Partner Note ({latest_brief.get('pkt_str','')})", expanded=True):
                 st.markdown(
-                    f"<div style='color:#ffffff;font-weight:700;'>{latest_brief.get('market_summary','')}</div>",
+                    f"<div style='color:#ffffff;font-weight:700;line-height:1.6;'>{latest_brief.get('market_summary','')}</div>",
                     unsafe_allow_html=True,
                 )
             with st.expander("📲 Bot-Ready Summary Payload"):
@@ -1061,7 +1050,7 @@ with tab_vault:
             with st.expander(f"{d_item.get('pkt_str','')} · {d_item.get('symbol','')} · {d_item.get('mode_label','')}", expanded=False):
                 st.markdown(
                     f"<div style='color:#ffffff;font-weight:700;'>{d_item.get('market_summary','')}</div>"
-                    f"<div style='color:#facc15;font-weight:700;margin-top:6px;'>Internal Correlation: {d_item.get('self_improvement_note','')}</div>",
+                    f"<div style='color:#facc15;font-weight:700;margin-top:6px;'>Memory Note: {d_item.get('self_improvement_note','')}</div>",
                     unsafe_allow_html=True,
                 )
     else:
