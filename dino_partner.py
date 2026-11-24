@@ -10,31 +10,40 @@ import streamlit as st
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 DINO_SYSTEM_PROMPT = """
-You are Dino, a battle-tested perpetual futures trading partner and big brother to the trader.
-Your job is to protect the trader's capital and framework discipline—never act like a hype bot, never invent off-framework signals, and never tell the trader to override their core signal engine's entries, stop-losses, or take-profits.
+You are Dino, an experienced perpetual futures trading partner and big brother to the trader.
+Never interfere with or override the trader's core signal framework (entries, stop-losses, take-profits, 1H/4H/1D structure, L2 imbalance, 3m CVD, GARCH volatility).
+Normal losses are part of trading; help the trader stay disciplined, spot real conflicts or momentum fades, and protect capital.
 
-How you think and advise:
-1. Respect the Framework: Treat the trader's 1H/4H/1D structure, order-book imbalance, 3m CVD, GARCH volatility, and ATR stops/targets as the core rules. Normal losses happen in real trading; distinguish a normal framework loss from a real flaw or warning gap.
-2. Correlate Memory & Logs: Always inspect past audit outcomes, audit notes/tags, and your own previous Dino summaries so you catch recurring mistakes (like chasing into momentum fade or holding against an active squeeze) and refine how you summarize and warn.
-3. Practical, Grounded Partner Tone: Speak like an experienced older-brother trader sitting next to them—calm, sharp, honest, and concise.
-4. Strict Format:
-   - Give a brief market/memory check in 2-3 crisp lines.
-   - For each trade or active signal reviewed, give a tight 2-3 line partner read covering: (a) what we should do/watch right now, (b) how this trade can win, and (c) how it can go into a loss.
-   - End with one short "Self-Improvement / Memory Note" (1-2 lines) on how you correlated past summaries/logs for next time.
+Whenever you run, you update ALL relevant targets in a single pass and correlate with prior Dino summaries and audit logs so you silently improve your own memory and judgment.
 
-Return ONLY valid JSON with this exact structure:
+Formatting rules:
+1. For every ACTIVE SIGNAL: give a sharp ONE-LINER partner read (action/watch + win/loss edge in one sentence).
+2. For every COMMITTED TRADE: give a BRIEF SUMMARY + LAYMAN SUMMARY (2-3 clear sentences covering what to do/watch, how this trade can win, and how it can go into a loss).
+3. Include a concise market & correlation summary plus an internal self-improvement note based on prior Dino summaries and logbook outcomes.
+
+Return ONLY valid JSON with this exact schema:
 {
-  "market_partner_note": "2-3 line big-brother market & memory read",
-  "trade_reads": [
+  "market_summary": "2 lines on market state, warnings, and correlation with past runs",
+  "active_signal_oneliners": [
     {
-      "target_id": "id or label",
+      "target_id": "signal_id",
       "label": "SYMBOL [TF] DIR",
       "stance": "FAVORABLE | WATCH_CLOSELY | HIGH_CAUTION",
-      "win_prob_est": "e.g. 58%",
-      "partner_take": "2-3 lines: what to do, how it wins, and how it can lose"
+      "win_prob_est": "e.g. 56%",
+      "oneliner": "Single crisp sentence: what to do, how it wins, and how it can lose"
     }
   ],
-  "memory_improvement_note": "1-2 lines on what was correlated from prior logs/summaries"
+  "committed_trade_reads": [
+    {
+      "target_id": "trade_id",
+      "label": "SYMBOL [TF] DIR",
+      "stance": "FAVORABLE | WATCH_CLOSELY | HIGH_CAUTION",
+      "win_prob_est": "e.g. 60%",
+      "brief_summary": "1 concise line on current position vs SL/TP1-TP3 and flow",
+      "layman_summary": "2 plain-English sentences: what to do now, how it can win, and how it can take a loss"
+    }
+  ],
+  "self_improvement_note": "1-2 lines on how Dino correlated prior summaries & logs to refine its memory"
 }
 """.strip()
 
@@ -53,13 +62,18 @@ class DinoPartner:
                 return str(sec.get("api_key")).strip()
         except Exception:
             pass
+        try:
+            sec_top = st.secrets.get("OPENROUTER_API_KEY", "")
+            if sec_top:
+                return str(sec_top).strip()
+        except Exception:
+            pass
         return ""
 
     @staticmethod
     def _build_local_fallback_brief(
         snap: Dict[str, Any],
         mode_label: str,
-        target_id: Optional[str] = None,
         reason: str = "",
     ) -> Dict[str, Any]:
         coin = snap.get("symbol", "BTCUSDT")
@@ -81,19 +95,29 @@ class DinoPartner:
         tp_hits = sum(1 for a in audit_archive if a.get("tp1_hit") or a.get("tp2_hit") or a.get("tp3_hit"))
         sl_hits = sum(1 for a in audit_archive if a.get("sl_hit"))
         decided = tp_hits + sl_hits
-        win_rate = f"{(tp_hits / decided * 100.0):.0f}%" if decided > 0 else "early sample"
+        win_est = f"{(tp_hits / decided * 100.0):.0f}%" if decided > 0 else "50%"
 
-        warn_part = " | ".join([w for w in [sq_msg, mom_msg] if w]) or "No active squeeze or momentum-fade warning."
-        market_note = (
+        warn_txt = " | ".join([w for w in [sq_msg, mom_msg] if w]) or "Market calm / no squeeze or momentum-fade warning."
+        market_summary = (
             f"{coin} at ${mid_px:,.2f} (1H/4H/1D: {tf_bias.get('1H','—')}/{tf_bias.get('4H','—')}/{tf_bias.get('1D','—')}, "
-            f"1H RSI {tf_rsi.get('1H',50.0):.0f}, Imb {imb:+.2f}, CVD {cvd:+.1f}). {warn_part} "
-            f"Logbook check: {tp_hits} TP+ vs {sl_hits} SL ({win_rate})."
+            f"RSI {tf_rsi.get('1H',50.0):.0f}, Imb {imb:+.2f}, CVD {cvd:+.1f}) — {warn_txt}"
         )
 
-        reads: List[Dict[str, Any]] = []
+        sig_oneliners: List[Dict[str, Any]] = []
+        for sig in prior_signals:
+            sig_oneliners.append({
+                "target_id": sig.signal_id,
+                "label": f"{sig.symbol} [{sig.timeframe}] {sig.direction}",
+                "stance": "WATCH_CLOSELY" if (sq_msg or mom_msg) else "FAVORABLE",
+                "win_prob_est": win_est,
+                "oneliner": (
+                    f"Follow framework entry near ${sig.entry_price:,.2f} (SL ${sig.stop_loss:,.2f}, TP1${sig.tp1:,.2f}): "
+                    f"wins if {sig.direction} flow holds, loses if momentum flips or price breaks SL."
+                ),
+            })
+
+        trade_reads: List[Dict[str, Any]] = []
         for tr in active_trades:
-            if target_id and tr.get("trade_id") != target_id:
-                continue
             t_sym = tr.get("symbol", coin)
             t_tf = tr.get("timeframe", "1H")
             t_dir = tr.get("direction", "LONG")
@@ -101,43 +125,35 @@ class DinoPartner:
             t_sl = float(tr.get("stop_loss", 0.0))
             t_tp1 = float(tr.get("tp1", 0.0))
             live_p = float(tickers.get(t_sym, {}).get("price", 0.0) or mid_px or t_entry)
-            diff_pct = (((live_p - t_entry) / max(t_entry, 1e-8)) * 100.0) * (1.0 if t_dir == "LONG" else -1.0)
+            move_pct = (((live_p - t_entry) / max(t_entry, 1e-8)) * 100.0) * (1.0 if t_dir == "LONG" else -1.0)
 
-            reads.append({
+            trade_reads.append({
                 "target_id": tr.get("trade_id", ""),
                 "label": f"{t_sym} [{t_tf}] {t_dir}",
-                "stance": "WATCH_CLOSELY" if (sq_msg or mom_msg or diff_pct < 0) else "FAVORABLE",
-                "win_prob_est": win_rate,
-                "partner_take": (
-                    f"Stick to the framework plan—current pace is {diff_pct:+.2f}% from entry toward TP1 (${t_tp1:,.2f}). "
-                    f"It wins if flow and structure stay aligned into TP1–TP3; it loses if momentum fades or price sweeps past SL (${t_sl:,.2f})."
+                "stance": "WATCH_CLOSELY" if (sq_msg or mom_msg or move_pct < 0) else "FAVORABLE",
+                "win_prob_est": win_est,
+                "brief_summary": f"Move {move_pct:+.2f}% | Live ${live_p:,.2f} vs Entry${t_entry:,.2f} | SL ${t_sl:,.2f} \vert{} TP1${t_tp1:,.2f}",
+                "layman_summary": (
+                    f"Stick to the framework levels and avoid emotional interference. "
+                    f"This trade can win if price pushes cleanly toward TP1 (${t_tp1:,.2f}) and higher targets with supportive flow, "
+                    f"and it can go into a loss if momentum fades against you or price sweeps past SL (${t_sl:,.2f})."
                 ),
             })
 
-        for sig in prior_signals:
-            if target_id and sig.signal_id != target_id:
-                continue
-            reads.append({
-                "target_id": sig.signal_id,
-                "label": f"{sig.symbol} [{sig.timeframe}] {sig.direction}",
-                "stance": "WATCH_CLOSELY" if (sq_msg or mom_msg) else "FAVORABLE",
-                "win_prob_est": win_rate,
-                "partner_take": (
-                    f"Framework setup is active around ${sig.entry_price:,.2f} with SL ${sig.stop_loss:,.2f} and TP1${sig.tp1:,.2f}. "
-                    f"It wins on clean continuation with order flow backing; it loses if order flow flips against {sig.direction} or volatility whips through SL."
-                ),
-            })
-
-        prev_note = dino_memory[0].get("memory_improvement_note", "") if dino_memory else ""
-        mem_note = (
-            f"Correlated {len(audit_archive)} logged signals and {len(dino_memory)} prior Dino runs"
-            f"{' (last note: ' + prev_note + ')' if prev_note else ''}."
-            f"{' (' + reason + ')' if reason else ''}"
+        prev_note = dino_memory[0].get("self_improvement_note", "") if dino_memory else ""
+        imp_note = (
+            f"Correlated {len(audit_archive)} logbook records and {len(dino_memory)} prior Dino runs "
+            f"({tp_hits} TP+ / {sl_hits} SL)."
+            f"{' Prior refinement: ' + prev_note if prev_note else ''}"
+            f"{' [' + reason + ']' if reason else ''}"
         )
 
         now_pkt = datetime.fromtimestamp(time.time() + 18000, tz=timezone.utc).strftime("%a %H:%M PKT").upper()
-        bot_msg = f"🦖 DINO ({now_pkt}) · {mode_label}\n{market_note}\n" + "\n".join(
-            [f"- {r['label']} [{r['stance']}]: {r['partner_take']}" for r in reads[:4]]
+        bot_msg = (
+            f"🦖 DINO ({now_pkt}) · {mode_label}\n{market_summary}\n"
+            + "\n".join([f"• Signal {s['label']}: {s['oneliner']}" for s in sig_oneliners])
+            + ("\n" if sig_oneliners and trade_reads else "")
+            + "\n".join([f"• Trade {t['label']}: {t['brief_summary']} — {t['layman_summary']}" for t in trade_reads])
         )
 
         return {
@@ -146,26 +162,25 @@ class DinoPartner:
             "pkt_str": now_pkt,
             "symbol": coin,
             "mode_label": mode_label,
-            "target_id": target_id or "ALL",
-            "market_partner_note": market_note,
-            "trade_reads": reads,
-            "memory_improvement_note": mem_note,
+            "market_summary": market_summary,
+            "active_signal_oneliners": sig_oneliners,
+            "committed_trade_reads": trade_reads,
+            "self_improvement_note": imp_note,
             "bot_message": bot_msg,
         }
 
     @classmethod
-    def run_on_demand(
+    def run_all_on_demand(
         cls,
         snap: Dict[str, Any],
         api_key: str,
         model: str = "openrouter/free",
-        mode_label: str = "ON-DEMAND PARTNER CHECK",
-        target_id: Optional[str] = None,
+        mode_label: str = "FULL ON-DEMAND SYNC",
     ) -> Dict[str, Any]:
         clean_key = cls.resolve_api_key(api_key)
         if not clean_key:
             return cls._build_local_fallback_brief(
-                snap, mode_label, target_id, reason="No OpenRouter key set yet—using local logbook/memory summary"
+                snap, mode_label, reason="No OpenRouter key detected—using local logbook/memory correlation"
             )
 
         coin = snap.get("symbol", "BTCUSDT")
@@ -195,7 +210,6 @@ class DinoPartner:
                 "early_warning": s.early_warning,
             }
             for s in prior_signals
-            if not target_id or s.signal_id == target_id
         ]
 
         trades_payload = [
@@ -217,34 +231,10 @@ class DinoPartner:
                 "squeeze_alert": t.get("squeeze_alert", ""),
             }
             for t in active_trades
-            if not target_id or t.get("trade_id") == target_id
-        ]
-
-        recent_logs = [
-            {
-                "symbol": a.get("symbol"),
-                "tf": a.get("timeframe"),
-                "dir": a.get("direction"),
-                "status": a.get("status_note"),
-                "tag": a.get("audit_tag"),
-                "note": a.get("audit_note"),
-            }
-            for a in audit_archive[:25]
-        ]
-
-        prev_dino = [
-            {
-                "pkt": d.get("pkt_str"),
-                "symbol": d.get("symbol"),
-                "market": d.get("market_partner_note"),
-                "improvement": d.get("memory_improvement_note"),
-            }
-            for d in dino_memory[:6]
         ]
 
         user_context = {
-            "request_mode": mode_label,
-            "target_id": target_id,
+            "mode_label": mode_label,
             "market": {
                 "symbol": coin,
                 "mid_price": metrics.get("mid_price", tickers.get(coin, {}).get("price", 0.0)),
@@ -256,11 +246,28 @@ class DinoPartner:
                 "squeeze_msg": metrics.get("squeeze_msg", ""),
                 "momentum_msg": metrics.get("momentum_msg", ""),
             },
-            "active_signals": signals_payload,
-            "committed_trades": trades_payload,
-            "recent_audit_logs": recent_logs,
+            "all_active_signals": signals_payload,
+            "all_committed_trades": trades_payload,
+            "recent_audit_logs": [
+                {
+                    "symbol": a.get("symbol"),
+                    "tf": a.get("timeframe"),
+                    "dir": a.get("direction"),
+                    "status": a.get("status_note"),
+                    "tag": a.get("audit_tag"),
+                    "note": a.get("audit_note"),
+                }
+                for a in audit_archive[:25]
+            ],
             "audit_reviews": audit_reviews[:8],
-            "previous_dino_summaries": prev_dino,
+            "previous_dino_memory": [
+                {
+                    "pkt": d.get("pkt_str"),
+                    "market": d.get("market_summary"),
+                    "improvement": d.get("self_improvement_note"),
+                }
+                for d in dino_memory[:6]
+            ],
         }
 
         try:
@@ -291,14 +298,23 @@ class DinoPartner:
             parsed = json.loads(raw_content)
 
             now_pkt = datetime.fromtimestamp(time.time() + 18000, tz=timezone.utc).strftime("%a %H:%M PKT").upper()
-            market_note = str(parsed.get("market_partner_note", "")).strip()
-            reads = parsed.get("trade_reads", [])
-            if not isinstance(reads, list):
-                reads = []
-            mem_note = str(parsed.get("memory_improvement_note", "")).strip()
+            market_summary = str(parsed.get("market_summary", "")).strip()
+            sig_oneliners = parsed.get("active_signal_oneliners", [])
+            if not isinstance(sig_oneliners, list):
+                sig_oneliners = []
+            trade_reads = parsed.get("committed_trade_reads", [])
+            if not isinstance(trade_reads, list):
+                trade_reads = []
+            imp_note = str(parsed.get("self_improvement_note", "")).strip()
 
-            bot_msg = f"🦖 DINO ({now_pkt}) · {mode_label}\n{market_note}\n" + "\n".join(
-                [f"- {r.get('label','')} [{r.get('stance','')}]: {r.get('partner_take','')}" for r in reads[:5]]
+            bot_msg = (
+                f"🦖 DINO ({now_pkt}) · {mode_label}\n{market_summary}\n"
+                + "\n".join([f"• Signal {s.get('label','')}: {s.get('oneliner','')}" for s in sig_oneliners])
+                + ("\n" if sig_oneliners and trade_reads else "")
+                + "\n".join([
+                    f"• Trade {t.get('label','')}: {t.get('brief_summary','')} — {t.get('layman_summary','')}"
+                    for t in trade_reads
+                ])
             )
 
             return {
@@ -307,13 +323,13 @@ class DinoPartner:
                 "pkt_str": now_pkt,
                 "symbol": coin,
                 "mode_label": mode_label,
-                "target_id": target_id or "ALL",
-                "market_partner_note": market_note,
-                "trade_reads": reads,
-                "memory_improvement_note": mem_note,
+                "market_summary": market_summary,
+                "active_signal_oneliners": sig_oneliners,
+                "committed_trade_reads": trade_reads,
+                "self_improvement_note": imp_note,
                 "bot_message": bot_msg,
             }
         except Exception as exc:
             return cls._build_local_fallback_brief(
-                snap, mode_label, target_id, reason=f"OpenRouter call fallback ({exc})"
+                snap, mode_label, reason=f"OpenRouter fallback ({exc})"
             )
