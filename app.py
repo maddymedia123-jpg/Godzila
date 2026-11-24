@@ -60,7 +60,7 @@ st.markdown(
         color: #ffffff !important;
         font-weight: 700 !important;
     }
-    /* Fix white background / white text on expanders and inputs */
+    /* High-contrast dark styling for expanders, buttons, and inputs */
     [data-testid="stExpander"],
     [data-testid="stExpander"] > details,
     [data-testid="stExpander"] summary,
@@ -72,6 +72,12 @@ st.markdown(
     [data-testid="stExpander"] summary span,
     [data-testid="stExpander"] summary p {
         color: #38bdf8 !important;
+        font-weight: 800 !important;
+    }
+    .stButton > button, .stDownloadButton > button {
+        background-color: #0b1926 !important;
+        color: #ffffff !important;
+        border: 1px solid #38bdf8 !important;
         font-weight: 800 !important;
     }
     input, textarea, [data-baseweb="input"] > div, [data-baseweb="textarea"] > div {
@@ -280,6 +286,8 @@ def _invoke_dino_all(snap: dict, mode_label: str) -> dict:
         manager.save_dino_entry(brief)
     else:
         with manager._lock:
+            if not hasattr(manager, "dino_memory"):
+                manager.dino_memory = []
             manager.dino_memory.insert(0, brief)
             manager._save_portfolio_to_turso()
 
@@ -600,7 +608,6 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
                     manager.kill_trade(t_id)
                     st.rerun()
 
-            # Collapsible Dino Brief + Layman Summary (updates all trades & signals in 1 run)
             matched_tr = trade_reads_map.get(t_id) or trade_reads_map.get(f"{t_sym} [{t_tf}] {t_dir}")
             exp_title = (
                 f"🦖 Dino Brief & Layman Summary ({matched_tr.get('stance','WATCH')} · Est {matched_tr.get('win_prob_est','—')})"
@@ -786,7 +793,6 @@ with tab_student:
         with act_tab_4h:
             render_active_trades_table(trades_4h, tickers, "4H", snap)
 
-        # Single-Pass On-Demand Dino Partner Console
         st.markdown("---")
         st.subheader("🦖 Dino — Single-Run Partner Sync (Committed + Active Signals + Turso Memory)")
 
