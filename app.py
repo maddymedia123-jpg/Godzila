@@ -228,6 +228,36 @@ def fmt_px(val: float) -> str:
     return f"${val:,.2f}"
 
 
+def get_coin_liq(coin: str, mid_price: float, liq_raw: dict, vol_pct: float = 1.5) -> dict:
+    """Always returns liquidation clusters scaled strictly to the selected coin's own price."""
+    long_c = float(liq_raw.get("long_cluster", 0.0) or 0.0)
+    short_c = float(liq_raw.get("short_cluster", 0.0) or 0.0)
+    long_usd = float(liq_raw.get("long_usd", 0.0) or 0.0)
+    short_usd = float(liq_raw.get("short_usd", 0.0) or 0.0)
+
+    if mid_price > 0:
+        out_of_range = (
+            long_c <= 0
+            or short_c <= 0
+            or long_c >= mid_price
+            or short_c <= mid_price
+            or (mid_price - long_c) / mid_price > 0.35
+            or (short_c - mid_price) / mid_price > 0.35
+        )
+        if out_of_range:
+            band = max(0.012, min(0.08, (vol_pct / 100.0) * 1.4))
+            long_c = mid_price * (1.0 - band)
+            short_c = mid_price * (1.0 + band)
+
+    return {
+        "coin": coin,
+        "long_cluster": long_c,
+        "short_cluster": short_c,
+        "long_usd": long_usd,
+        "short_usd": short_usd,
+    }
+
+
 def build_audit_csv(rows: list) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
@@ -291,6 +321,29 @@ def _get_current_dino_brief(snap: dict) -> dict | None:
         return st.session_state.dino_latest_brief
     mem = snap.get("dino_memory", [])
     return mem[0] if mem else None
+
+
+def render_top_dino_banner(coin: str, snap: dict):
+    brief = _get_current_dino_brief(snap)
+    title_lbl = (
+        f"🦖 Dino Market & Roadmap Brief ({brief.get('pkt_str', '')}) — Click to Expand / Collapse"
+        if brief
+        else "🦖 Dino Market & Roadmap Brief (Collapsed — Click to Expand or Run Dino)"
+    )
+    with st.expander(title_lbl, expanded=False):
+        if brief:
+            coin_note = brief.get("coin_summaries", {}).get(coin, "")
+            st.markdown(
+                f"<div style='color:#ffffff;font-weight:700;line-height:1.65;margin-bottom:8px;'>{brief.get('market_summary', '')}</div>"
+                f"<div style='color:#38bdf8;font-weight:700;line-height:1.6;margin-bottom:8px;'><strong>{coin} Desk Note:</strong> {coin_note}</div>"
+                f"<div style='color:#facc15;font-weight:700;line-height:1.55;'><strong>Roadmap & Memory Check:</strong> {brief.get('reconciliation_note', '')}</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div style='color:#cbd5e1;font-weight:700;'>No Dino market brief saved yet. Hit Run Dino from anywhere to generate and store the overall market brief, coin notes, and roadmap.</div>",
+                unsafe_allow_html=True,
+            )
 
 
 def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int, snap: dict):
@@ -360,7 +413,7 @@ def render_prioritized_signal_card(sig, mid_price: float, rank_idx: int, snap: d
                     break
 
         if matched_oneliner:
-            with st.expander(f"🦖 Dino Call ({matched_oneliner.get('call','GOOD TO GO')})", expanded=True):
+            with st.expander(f"🦖 Dino One-Liner · {matched_oneliner.get('call','GOOD TO GO')}", expanded=True):
                 st.markdown(
                     f"<div style='color:#ffffff;font-weight:700;'>{matched_oneliner.get('oneliner','')}</div>",
                     unsafe_allow_html=True,
@@ -687,8 +740,9 @@ with tab_student:
     def render_godzilla_dashboard():
         coin = st.session_state.student_coin
         snap = manager.get_snapshot(coin)
+        render_top_dino_banner(coin, snap)
+
         metrics = snap.get("metrics", {})
-        liq = snap.get("liq_stats", {})
         tickers = snap.get("coin_tickers", {})
         tf_bias = snap.get("tf_bias", {})
         tf_rsi = snap.get("tf_rsi", {})
@@ -715,12 +769,13 @@ with tab_student:
                 unsafe_allow_html=True,
             )
 
-        mid_price = metrics.get("mid_price", 0.0)
+        mid_price = float(metrics.get("mid_price", 0.0) or 0.0)
         if mid_price <= 0.0 and coin in tickers:
             mid_price = float(tickers[coin].get("price", 0.0))
 
-        imbalance = metrics.get("imbalance_t", 0.0)
-        garch_vol = metrics.get("garch_sigma", 0.0045)
+        imbalance = float(metrics.get("imbalance_t", 0.0))
+        garch_vol = float(metrics.get("garch_sigma", 0.0045))
+        liq = get_coin_liq(coin, mid_price, snap.get("liq_stats", {}), garch_vol * 100.0)
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric(f"{coin} Live Price", fmt_px(mid_price))
@@ -730,19 +785,26 @@ with tab_student:
 
         st.markdown("---")
 
-        st.subheader(f"🔥 Godzilla Liquidation Clusters ({coin})")
+        st.subheader(f"🔥 {coin} Liquidation Clusters (Own Coin Levels)")
         l1, l2, l3 = st.columns(3)
         l1.metric(
-            "Long Liquidation Cluster",
+            f"{coin} Long Liquidation Zone",
             fmt_px(liq.get("long_cluster", 0.0)),
-            f"${liq.get('long_usd', 0.0):,.0f} Est. Pool",
+            f"${liq.get('long_usd', 0.0):,.0f} Est. Pool" if liq.get("long_usd", 0.0) > 0 else f"{coin} Support Watch",
         )
         l2.metric(
-            "Short Liquidation Cluster",
+            f"{coin} Short Liquidation Zone",
             fmt_px(liq.get("short_cluster", 0.0)),
-            f"${liq.get('short_usd', 0.0):,.0f} Est. Pool",
+            f"${liq.get('short_usd', 0.0):,.0f} Est. Pool" if liq.get("short_usd", 0.0) > 0 else f"{coin} Upside Watch",
         )
         l3.metric("RSI Momentum (1H / 4H)", f"1H: {tf_rsi.get('1H', 50.0):.1f} | 4H: {tf_rsi.get('4H', 50.0):.1f}")
+
+        brief = _get_current_dino_brief(snap)
+        if brief and brief.get("coin_summaries", {}).get(coin):
+            st.markdown(
+                f"<div style='color:#cbd5e1;font-weight:700;margin-top:6px;'>🦖 {coin} Check: {brief['coin_summaries'][coin]}</div>",
+                unsafe_allow_html=True,
+            )
 
         st.markdown("---")
 
@@ -811,7 +873,8 @@ with tab_student:
         if latest_brief:
             with st.expander(f"🦖 Dino Latest Partner Note ({latest_brief.get('pkt_str','')})", expanded=True):
                 st.markdown(
-                    f"<div style='color:#ffffff;font-weight:700;line-height:1.6;'>{latest_brief.get('market_summary','')}</div>",
+                    f"<div style='color:#ffffff;font-weight:700;line-height:1.6;'>{latest_brief.get('market_summary','')}</div>"
+                    f"<div style='color:#facc15;font-weight:700;line-height:1.5;margin-top:6px;'>{latest_brief.get('reconciliation_note','')}</div>",
                     unsafe_allow_html=True,
                 )
             with st.expander("📲 Bot-Ready Summary Payload"):
@@ -1050,6 +1113,7 @@ with tab_vault:
             with st.expander(f"{d_item.get('pkt_str','')} · {d_item.get('symbol','')} · {d_item.get('mode_label','')}", expanded=False):
                 st.markdown(
                     f"<div style='color:#ffffff;font-weight:700;'>{d_item.get('market_summary','')}</div>"
+                    f"<div style='color:#38bdf8;font-weight:700;margin-top:6px;'>Roadmap: {d_item.get('reconciliation_note','')}</div>"
                     f"<div style='color:#facc15;font-weight:700;margin-top:6px;'>Memory Note: {d_item.get('self_improvement_note','')}</div>",
                     unsafe_allow_html=True,
                 )
