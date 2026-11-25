@@ -299,13 +299,56 @@ class BinanceFuturesStreamManager:
             "status_note": "ACTIVE (UNCOMMITTED SIGNAL)" if source_mode == "BOT_SIGNAL" else "COMMITTED ACTIVE",
         }
 
-    def _auto_log_emitted_signals(self, eng: QuantEngine) -> None:
-        new_sigs = eng.drain_emitted_signals()
-        if not new_sigs:
+    @staticmethod
+    def _is_reversal_or_squeeze_blocked(sig: CommittedSignal, eng: QuantEngine, metrics: Dict[str, Any]) -> bool:
+        """Blocks new signal emission during short squeezes or exhaustion/reversal zones."""
+        sq_state = str(metrics.get("squeeze_state", "NORMAL"))
+        sq_alert = str(getattr(sig, "squeeze_alert", "") or "")
+        early_warn = str(getattr(sig, "early_warning", "") or "").lower()
+        htf_sum = str(getattr(sig, "htf_summary", "") or "").lower()
+        rsi_1h = float(eng.tf_rsi.get("1H", 50.0))
+        rsi_4h = float(eng.tf_rsi.get("4H", 50.0))
+
+        if sq_state == "SHORT_SQUEEZE_RISK" or "short squeeze" in sq_alert.lower():
+            return True
+        if "reversal" in early_warn or "exhaustion" in early_warn or "reversal" in htf_sum:
+            return True
+        if sig.direction == "SHORT" and (rsi_1h <= 25.0 or rsi_4h <= 25.0):
+            return True
+        if sig.direction == "LONG" and (rsi_1h >= 75.0 or rsi_4h >= 75.0):
+            return True
+        return False
+
+    def _filter_and_log_signals(self, sym: str, eng: QuantEngine, metrics: Dict[str, Any]) -> None:
+        raw_signals = eng.drain_emitted_signals()
+        filtered_active: List[CommittedSignal] = []
+
+        for tf_key in ("1H", "4H"):
+            tf_list = list(eng.signals_by_tf.get(tf_key, []))
+            kept_tf = []
+            for s in tf_list:
+                if self._is_reversal_or_squeeze_blocked(s, eng, metrics):
+                    s.in_reversal_zone = True
+                    s.squeeze_alert = s.squeeze_alert or "REVERSAL / SQUEEZE ZONE — SIGNAL HELD BACK"
+                else:
+                    s.in_reversal_zone = False
+                    kept_tf.append(s)
+            eng.signals_by_tf[tf_key] = kept_tf
+            filtered_active.extend(kept_tf)
+
+        if "prioritized_signals" in metrics:
+            metrics["prioritized_signals"] = [
+                s for s in metrics["prioritized_signals"] if not self._is_reversal_or_squeeze_blocked(s, eng, metrics)
+            ]
+
+        if not raw_signals:
             return
+
         added = False
         existing_ids = {item.get("trade_id") for item in self.audit_archive}
-        for sig in new_sigs:
+        for sig in raw_signals:
+            if self._is_reversal_or_squeeze_blocked(sig, eng, metrics):
+                continue
             if sig.signal_id not in existing_ids:
                 rec = self._signal_to_record(sig, source_mode="BOT_SIGNAL")
                 self.audit_archive.insert(0, rec)
@@ -381,47 +424,50 @@ class BinanceFuturesStreamManager:
 
         if direction == "SHORT" and squeeze_state == "SHORT_SQUEEZE_RISK":
             if rec.get("squeeze_alert") != squeeze_msg:
-                rec["squeeze_alert"] = squeeze_msg
+                rec["squeeze_alert"] = squeeze_msg or "SHORT SQUEEZE PRESSURE ACTIVE"
                 changed = True
         elif direction == "LONG" and squeeze_state == "LONG_SQUEEZE_RISK":
             if rec.get("squeeze_alert") != squeeze_msg:
-                rec["squeeze_alert"] = squeeze_msg
+                rec["squeeze_alert"] = squeeze_msg or "LONG SQUEEZE PRESSURE ACTIVE"
                 changed = True
         else:
             if rec.get("squeeze_alert"):
                 rec["squeeze_alert"] = ""
                 changed = True
 
-        if (direction == "LONG" and mid_price <= sl) or (direction == "SHORT" and mid_price >= sl):
+        sl_breached = (direction == "LONG" and sl > 0 and mid_price <= sl) or (
+            direction == "SHORT" and sl > 0 and mid_price >= sl
+        )
+        if sl_breached:
             rec["sl_hit"] = True
             rec["status_note"] = "STOP-LOSS HIT"
             rec["closed_at"] = time.time()
             return True
 
         if direction == "LONG":
-            if not rec.get("tp1_hit") and mid_price >= tp1:
+            if not rec.get("tp1_hit") and tp1 > 0 and mid_price >= tp1:
                 rec["tp1_hit"] = True
                 rec["status_note"] = "TP1 HIT"
                 changed = True
-            if not rec.get("tp2_hit") and mid_price >= tp2:
+            if not rec.get("tp2_hit") and tp2 > 0 and mid_price >= tp2:
                 rec["tp2_hit"] = True
                 rec["status_note"] = "TP2 HIT"
                 changed = True
-            if not rec.get("tp3_hit") and mid_price >= tp3:
+            if not rec.get("tp3_hit") and tp3 > 0 and mid_price >= tp3:
                 rec["tp3_hit"] = True
                 rec["status_note"] = "ALL TPs HIT"
                 rec["closed_at"] = time.time()
                 changed = True
         else:
-            if not rec.get("tp1_hit") and mid_price <= tp1:
+            if not rec.get("tp1_hit") and tp1 > 0 and mid_price <= tp1:
                 rec["tp1_hit"] = True
                 rec["status_note"] = "TP1 HIT"
                 changed = True
-            if not rec.get("tp2_hit") and mid_price <= tp2:
+            if not rec.get("tp2_hit") and tp2 > 0 and mid_price <= tp2:
                 rec["tp2_hit"] = True
                 rec["status_note"] = "TP2 HIT"
                 changed = True
-            if not rec.get("tp3_hit") and mid_price <= tp3:
+            if not rec.get("tp3_hit") and tp3 > 0 and mid_price <= tp3:
                 rec["tp3_hit"] = True
                 rec["status_note"] = "ALL TPs HIT"
                 rec["closed_at"] = time.time()
@@ -490,6 +536,8 @@ class BinanceFuturesStreamManager:
                     "price": st_data.get("mid_price", 0.0),
                     "mid_price": st_data.get("mid_price", 0.0),
                     "imbalance_t": st_data.get("imbalance_t", 0.0),
+                    "squeeze_state": st_data.get("squeeze_state", "NORMAL"),
+                    "squeeze_msg": st_data.get("squeeze_msg", ""),
                 }
 
             return {
@@ -587,8 +635,8 @@ class BinanceFuturesStreamManager:
                                                 self.student_balance,
                                             )
                                             if metrics:
+                                                self._filter_and_log_signals(sym, eng, metrics)
                                                 self._latest_states[sym] = metrics
-                                                self._auto_log_emitted_signals(eng)
                                                 self._update_active_trades_telemetry(
                                                     sym,
                                                     metrics["mid_price"],
@@ -654,8 +702,8 @@ class BinanceFuturesStreamManager:
                                     self.student_balance,
                                 )
                                 if metrics:
+                                    self._filter_and_log_signals(sym, eng, metrics)
                                     self._latest_states[sym] = metrics
-                                    self._auto_log_emitted_signals(eng)
                                     self._update_active_trades_telemetry(
                                         sym,
                                         metrics["mid_price"],
