@@ -11,22 +11,38 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 DINO_SYSTEM_PROMPT = (
     "You are Dino, a calm, experienced trading partner sitting right next to the trader at the desk.\n"
-    "Speak in polite, plain, natural English—no indicator jargon, no bloated lectures, no headings.\n"
-    "Never override the framework's entries, stops, or take-profits.\n\n"
-    "On every run:\n"
-    "1. Correlate directly with previous_dino_memory so you build on what you said last time and point out what changed.\n"
-    "2. Analyze each coin on its own live levels (entry, SL, TP1-TP3, and liquidation cluster).\n"
-    "3. For every ACTIVE SIGNAL: give a ONE-LINER with the approaching key level, probability hint, and whether it is GOOD TO GO or STAND DOWN.\n"
-    "4. For every COMMITTED TRADE: give a short conversational paragraph (no headings) stating what the live market is doing around key support/resistance, whether a spike is likely just a liquidation wick (so don't panic-close on a wick), when to recheck in PKT, and whether the trade is still GOOD TO GO or SHOULD BE STOPPED.\n\n"
-    "Return ONLY valid JSON matching this schema:\n"
+    "Speak in simple, plain, interactive everyday English—no indicator jargon, no heavy data dumps, "
+    "no stiff headings. Talk like a real trader pointing at the screen: 'watch here', 'go here'.\n"
+    "Never override the framework's entry, stop-loss, or take-profit levels, and never prescribe an exact "
+    "dollar amount—only guide whether the market feels quiet or risky and how cautious to be with committing.\n\n"
+    "Every time you run:\n"
+    "1. Check previous_dino_memory, reconcile what happened since the last summary, note any misses or "
+    "shifts, and update the roadmap.\n"
+    "2. Give an overall layman market summary: bear or bullish lean, main confluences, roughly how long "
+    "or until what level that trend holds, whether the market is quiet or risky, and whether signals look "
+    "healthy or risky.\n"
+    "3. Give each coin its OWN coin-specific summary and guidance (never copy BTC's levels onto TAO or alts).\n"
+    "4. Give a ONE-LINER for every active signal and a short conversational paragraph for every committed trade "
+    "(including wick vs real break guidance and when to recheck in PKT).\n\n"
+    "Return ONLY valid JSON matching this exact schema:\n"
     "{\n"
-    '  "market_summary": "2 polite conversational sentences on what changed since last check and what the market is doing now",\n'
+    '  "reconciliation_note": "1-2 plain sentences comparing this run with the previous summary and updating the roadmap",\n'
+    '  "market_summary": "A plain layman paragraph covering bear/bullish lean, confluences, trend horizon/invalidation level, quiet vs risky mood, and overall signal quality",\n'
+    '  "coin_summaries": {\n'
+    '    "BTCUSDT": "Plain coin-specific note: where price is, what to watch, wick/level to respect",\n'
+    '    "ETHUSDT": "Plain coin-specific note",\n'
+    '    "SOLUSDT": "Plain coin-specific note",\n'
+    '    "XRPUSDT": "Plain coin-specific note",\n'
+    '    "DOGEUSDT": "Plain coin-specific note",\n'
+    '    "TAOUSDT": "Plain TAO-specific note using TAO price & levels only",\n'
+    '    "AAVEUSDT": "Plain AAVE-specific note using AAVE price & levels only"\n'
+    "  },\n"
     '  "active_signal_oneliners": [\n'
     "    {\n"
     '      "target_id": "signal_id",\n'
     '      "label": "SYMBOL [TF] DIR",\n'
-    '      "call": "GOOD TO GO | STAND DOWN",\n'
-    '      "oneliner": "One clear sentence with key approaching level, hit probability, and whether it is good to go"\n'
+    '      "call": "GOOD TO GO | RISKY / STAND DOWN",\n'
+    '      "oneliner": "One clear sentence: watch here, go here, signal quality, and when to recheck"\n'
     "    }\n"
     "  ],\n"
     '  "committed_trade_reads": [\n'
@@ -34,10 +50,10 @@ DINO_SYSTEM_PROMPT = (
     '      "target_id": "trade_id",\n'
     '      "label": "SYMBOL [TF] DIR",\n'
     '      "call": "GOOD TO GO | STOP / CUT TRADE",\n'
-    '      "paragraph": "One concise, polite conversational paragraph (no headings) building on the previous check: approaching levels, liquidation wick warning, PKT recheck time, and clear good-to-go or stop call."\n'
+    '      "paragraph": "Short conversational paragraph: what changed, watch here/go here, wick vs real break, PKT recheck, and good-to-go or stop call"\n'
     "    }\n"
     "  ],\n"
-    '  "self_improvement_note": "1 short line on what Dino learned from correlating past checks and log outcomes"\n'
+    '  "self_improvement_note": "1 short line on how Dino refined its future roadmap from past summaries and logs"\n'
     "}"
 )
 
@@ -75,14 +91,21 @@ class DinoPartner:
         return ""
 
     @staticmethod
+    def _coin_liq_pair(px: float, vol_pct: float = 1.5) -> tuple[float, float]:
+        if px <= 0:
+            return 0.0, 0.0
+        band = max(0.012, min(0.08, vol_pct / 100.0 * 1.4))
+        return round(px * (1.0 - band), 6), round(px * (1.0 + band), 6)
+
+    @classmethod
     def _build_local_desk_brief(
+        cls,
         snap: Dict[str, Any],
         mode_label: str,
         reason: str = "",
     ) -> Dict[str, Any]:
         coin = snap.get("symbol", "BTCUSDT")
         metrics = snap.get("metrics", {})
-        liq = snap.get("liq_stats", {})
         tickers = snap.get("coin_tickers", {})
         active_trades = snap.get("active_trades", [])
         prior_signals = snap.get("prioritized_signals", [])
@@ -92,45 +115,67 @@ class DinoPartner:
         mid_px = float(metrics.get("mid_price", 0.0) or tickers.get(coin, {}).get("price", 0.0))
         sq_msg = metrics.get("squeeze_msg", "")
         mom_msg = metrics.get("momentum_msg", "")
-        long_liq = float(liq.get("long_cluster", 0.0))
-        short_liq = float(liq.get("short_cluster", 0.0))
+        vol_pct = float(metrics.get("garch_sigma", 0.0045)) * 100.0
 
-        tp_hits = sum(1 for a in audit_archive if a.get("tp1_hit") or a.get("tp2_hit") or a.get("tp3_hit"))
-        sl_hits = sum(1 for a in audit_archive if a.get("sl_hit"))
-        decided = tp_hits + sl_hits
-        prob_str = f"{(tp_hits / decided * 100.0):.0f}%" if decided > 0 else "58%"
+        liq = snap.get("liq_stats", {})
+        long_liq = float(liq.get("long_cluster", 0.0) or 0.0)
+        short_liq = float(liq.get("short_cluster", 0.0) or 0.0)
+        if mid_px > 0 and (long_liq <= 0 or abs(long_liq - mid_px) / mid_px > 0.35):
+            long_liq, short_liq = cls._coin_liq_pair(mid_px, vol_pct)
 
         prev_brief = dino_memory[0] if dino_memory else None
         prev_time = prev_brief.get("pkt_str", "") if prev_brief else ""
         prev_px = float(prev_brief.get("anchor_price", 0.0)) if prev_brief else 0.0
+        prev_coin = prev_brief.get("symbol", coin) if prev_brief else coin
 
-        if prev_brief and prev_px > 0 and mid_px > 0:
+        if prev_brief and prev_coin == coin and prev_px > 0 and mid_px > 0:
             delta_pct = ((mid_px - prev_px) / prev_px) * 100.0
-            corr_prefix = f"Following up on our {prev_time} check (was {_fmt(prev_px)}, now {_fmt(mid_px)}, {delta_pct:+.2f}%): "
+            reconciliation_note = (
+                f"Checking back against our {prev_time} note on {coin} ({_fmt(prev_px)} then vs {_fmt(mid_px)} now, {delta_pct:+.2f}%): "
+                f"we keep the same roadmap and watch how price reacts around {_fmt(long_liq)} and {_fmt(short_liq)} before committing more."
+            )
+        elif prev_brief:
+            reconciliation_note = (
+                f"Reconciling with our last check at {prev_time}: we're carrying forward our earlier roadmap and updating "
+                f"what to watch right now on {coin} around {_fmt(mid_px)}."
+            )
         else:
-            corr_prefix = f"Looking at {coin} live around {_fmt(mid_px)}: "
+            reconciliation_note = (
+                f"Starting a fresh roadmap for {coin} around {_fmt(mid_px)}—every rerun from here will compare against this note "
+                f"and tighten what we watch next."
+            )
 
-        if sq_msg or mom_msg:
-            market_summary = (
-                f"{corr_prefix}pressure is building and we need to stay sharp around the nearby liquidation pockets "
-                f"({_fmt(long_liq)} below and {_fmt(short_liq)} above)."
-            )
-        else:
-            market_summary = (
-                f"{corr_prefix}price is moving steadily with nearby liquidation magnets sitting around "
-                f"{_fmt(long_liq)} on the downside and {_fmt(short_liq)} on the upside."
-            )
+        mood_txt = "risky and jumpy—keep position sizing light and be picky with signals" if (sq_msg or mom_msg) else (
+            "relatively calm and orderly—good setups can play out if you wait for clean levels"
+        )
+        market_summary = (
+            f"Right now the overall tape for {coin} around {_fmt(mid_px)} feels {mood_txt}. "
+            f"Watch {_fmt(long_liq)} below and {_fmt(short_liq)} above—if price sweeps into a liquidation pocket and snaps back, "
+            f"don't panic-close on a wick; only treat a clean hold past that zone as a real trend shift."
+        )
+
+        coin_summaries: Dict[str, str] = {}
+        for sym, t_info in tickers.items():
+            s_px = float(t_info.get("price", 0.0) or 0.0)
+            s_low, s_high = cls._coin_liq_pair(s_px, vol_pct)
+            if s_px > 0:
+                coin_summaries[sym] = (
+                    f"{sym} is sitting near {_fmt(s_px)}—watch {_fmt(s_low)} below and {_fmt(s_high)} above, "
+                    f"and treat quick pokes into those zones as possible wick sweeps unless price holds there."
+                )
+            else:
+                coin_summaries[sym] = f"{sym} is waiting on fresh price ticks—watch its own key support/resistance before committing."
 
         sig_oneliners: List[Dict[str, Any]] = []
         for sig in prior_signals:
-            call_txt = "GOOD TO GO" if not sq_msg else "STAND DOWN"
+            call_txt = "RISKY / STAND DOWN" if sq_msg else "GOOD TO GO"
             sig_oneliners.append({
                 "target_id": sig.signal_id,
                 "label": f"{sig.symbol} [{sig.timeframe}] {sig.direction}",
                 "call": call_txt,
                 "oneliner": (
-                    f"{call_txt}: {sig.symbol} is approaching {_fmt(sig.entry_price)} toward {_fmt(sig.tp1)} "
-                    f"(~{prob_str} hit odds, stop at {_fmt(sig.stop_loss)})—recheck around {sig.eta_tp1_str}."
+                    f"{call_txt}: watch {_fmt(sig.entry_price)} to go {sig.direction} toward {_fmt(sig.tp1)} "
+                    f"(stop {_fmt(sig.stop_loss)}), and recheck around {sig.eta_tp1_str}."
                 ),
             })
 
@@ -142,34 +187,24 @@ class DinoPartner:
             t_entry = float(tr.get("entry_price", 0.0))
             t_sl = float(tr.get("stop_loss", 0.0))
             t_tp1 = float(tr.get("tp1", 0.0))
-            t_tp2 = float(tr.get("tp2", 0.0))
             eta1 = tr.get("eta_tp1", "next candle close")
             sl_hit = bool(tr.get("sl_hit", False))
-            live_p = float(tickers.get(t_sym, {}).get("price", 0.0) or mid_px or t_entry)
-            wick_lvl = long_liq if (t_dir == "LONG" and long_liq > 0) else (short_liq if short_liq > 0 else t_sl)
-
-            prev_tr_call = ""
-            if prev_brief:
-                for old_r in prev_brief.get("committed_trade_reads", []):
-                    if old_r.get("target_id") == tr.get("trade_id") or old_r.get("label") == f"{t_sym} [{t_tf}] {t_dir}":
-                        prev_tr_call = old_r.get("call", "")
-                        break
+            live_p = float(tickers.get(t_sym, {}).get("price", 0.0) or (mid_px if t_sym == coin else t_entry))
+            t_wick_low, t_wick_high = cls._coin_liq_pair(live_p, vol_pct)
+            wick_watch = t_wick_low if t_dir == "LONG" else t_wick_high
 
             if sl_hit or tr.get("squeeze_alert"):
                 call_txt = "STOP / CUT TRADE"
                 para = (
-                    f"Since our last check{f' ({prev_tr_call})' if prev_tr_call else ''}, {t_sym} shifted against us "
-                    f"around {_fmt(live_p)} and breached our safety boundary near {_fmt(t_sl)}, so this trade should be stopped. "
-                    f"Step aside cleanly and wait for the next qualified setup rather than forcing a recovery."
+                    f"Hey, looking at {t_sym} around {_fmt(live_p)}: price has pushed past our safety line near {_fmt(t_sl)}, "
+                    f"so this trade should be stopped. Take the cut cleanly and wait for a fresh setup rather than hoping a wick saves it."
                 )
             else:
                 call_txt = "GOOD TO GO"
-                change_note = f"Continuing from our {prev_time} check, " if prev_time else ""
                 para = (
-                    f"{change_note}{t_sym} is trading at {_fmt(live_p)} against our {_fmt(t_entry)} entry and is currently good to go "
-                    f"as it works toward {_fmt(t_tp1)} (and {_fmt(t_tp2)} next). Keep an eye on the liquidation level near {_fmt(wick_lvl)}—"
-                    f"if price spikes there quickly, treat it as a liquidity wick hunting stops and do not close early unless it holds past {_fmt(t_sl)}; "
-                    f"let's recheck around {eta1}."
+                    f"Hey, {t_sym} is trading around {_fmt(live_p)} from our {_fmt(t_entry)} entry and is still good to go toward {_fmt(t_tp1)}. "
+                    f"Watch {_fmt(wick_watch)} closely—if price spikes there fast, that can be a liquidation wick hunting stops, so don't close "
+                    f"on a wick unless price stays past {_fmt(t_sl)}; let's recheck around {eta1}."
                 )
 
             trade_reads.append({
@@ -179,14 +214,16 @@ class DinoPartner:
                 "paragraph": para,
             })
 
+        tp_hits = sum(1 for a in audit_archive if a.get("tp1_hit") or a.get("tp2_hit") or a.get("tp3_hit"))
+        sl_hits = sum(1 for a in audit_archive if a.get("sl_hit"))
         imp_note = (
-            f"Synced {len(dino_memory)} prior notes and {len(audit_archive)} logged signals ({tp_hits} TP+ / {sl_hits} SL)."
+            f"Memory updated ({len(dino_memory) + 1} runs · {len(audit_archive)} logged signals: {tp_hits} TP+ / {sl_hits} SL)."
             + (f" [{reason}]" if reason else "")
         )
 
         now_pkt = datetime.fromtimestamp(time.time() + 18000, tz=timezone.utc).strftime("%a %H:%M PKT").upper()
         bot_msg = (
-            f"DINO ({now_pkt})\n{market_summary}\n"
+            f"DINO ({now_pkt})\n{market_summary}\nRoadmap: {reconciliation_note}\n"
             + "\n".join([f"- {s['label']}: {s['oneliner']}" for s in sig_oneliners])
             + ("\n" if sig_oneliners and trade_reads else "")
             + "\n".join([f"- {t['label']} [{t['call']}]: {t['paragraph']}" for t in trade_reads])
@@ -199,7 +236,9 @@ class DinoPartner:
             "symbol": coin,
             "anchor_price": mid_px,
             "mode_label": mode_label,
+            "reconciliation_note": reconciliation_note,
             "market_summary": market_summary,
+            "coin_summaries": coin_summaries,
             "active_signal_oneliners": sig_oneliners,
             "committed_trade_reads": trade_reads,
             "self_improvement_note": imp_note,
@@ -216,11 +255,10 @@ class DinoPartner:
     ) -> Dict[str, Any]:
         clean_key = cls.resolve_api_key(api_key)
         if not clean_key:
-            return cls._build_local_desk_brief(snap, mode_label, "Local desk mode")
+            return cls._build_local_desk_brief(snap, mode_label, "Local desk partner mode")
 
         coin = snap.get("symbol", "BTCUSDT")
         metrics = snap.get("metrics", {})
-        liq = snap.get("liq_stats", {})
         tickers = snap.get("coin_tickers", {})
         active_trades = snap.get("active_trades", [])
         prior_signals = snap.get("prioritized_signals", [])
@@ -229,12 +267,9 @@ class DinoPartner:
         mid_px = float(metrics.get("mid_price", 0.0) or tickers.get(coin, {}).get("price", 0.0))
 
         user_context = {
-            "coin": coin,
+            "active_coin": coin,
             "live_price": mid_px,
-            "liquidation_levels": {
-                "downside_pool": liq.get("long_cluster", 0.0),
-                "upside_pool": liq.get("short_cluster", 0.0),
-            },
+            "all_watchlist_prices": {k: v.get("price", 0.0) for k, v in tickers.items()},
             "warnings": {
                 "squeeze": metrics.get("squeeze_msg", ""),
                 "momentum": metrics.get("momentum_msg", ""),
@@ -269,8 +304,10 @@ class DinoPartner:
             "previous_dino_memory": [
                 {
                     "pkt": d.get("pkt_str"),
+                    "coin": d.get("symbol"),
+                    "anchor_price": d.get("anchor_price"),
+                    "reconciliation": d.get("reconciliation_note"),
                     "summary": d.get("market_summary"),
-                    "trades": d.get("committed_trade_reads", []),
                 }
                 for d in dino_memory[:4]
             ],
@@ -290,7 +327,7 @@ class DinoPartner:
                 },
                 json={
                     "model": (model or "openrouter/free").strip(),
-                    "temperature": 0.3,
+                    "temperature": 0.35,
                     "messages": [
                         {"role": "system", "content": DINO_SYSTEM_PROMPT},
                         {"role": "user", "content": json.dumps(user_context)},
@@ -307,18 +344,30 @@ class DinoPartner:
                     raw_content = raw_content[4:].strip()
             parsed = json.loads(raw_content)
 
-            now_pkt = datetime.fromtimestamp(time.time() + 18000, tz=timezone.utc).strftime("%a %H:%M PKT").upper()
-            market_summary = str(parsed.get("market_summary", "")).strip()
+            fallback = cls._build_local_desk_brief(snap, mode_label, "OpenRouter synced")
+            now_pkt = fallback["pkt_str"]
+            reconciliation_note = str(parsed.get("reconciliation_note", "")).strip() or fallback["reconciliation_note"]
+            market_summary = str(parsed.get("market_summary", "")).strip() or fallback["market_summary"]
+            coin_summaries = parsed.get("coin_summaries", {})
+            if not isinstance(coin_summaries, dict):
+                coin_summaries = fallback["coin_summaries"]
+            else:
+                merged_cs = dict(fallback["coin_summaries"])
+                for k, v in coin_summaries.items():
+                    if isinstance(v, str) and v.strip():
+                        merged_cs[str(k).upper()] = v.strip()
+                coin_summaries = merged_cs
+
             sig_oneliners = parsed.get("active_signal_oneliners", [])
             if not isinstance(sig_oneliners, list):
-                sig_oneliners = []
+                sig_oneliners = fallback["active_signal_oneliners"]
             trade_reads = parsed.get("committed_trade_reads", [])
             if not isinstance(trade_reads, list):
-                trade_reads = []
-            imp_note = str(parsed.get("self_improvement_note", "")).strip()
+                trade_reads = fallback["committed_trade_reads"]
+            imp_note = str(parsed.get("self_improvement_note", "")).strip() or fallback["self_improvement_note"]
 
             bot_msg = (
-                f"DINO ({now_pkt})\n{market_summary}\n"
+                f"DINO ({now_pkt})\n{market_summary}\nRoadmap: {reconciliation_note}\n"
                 + "\n".join([f"- {s.get('label', '')}: {s.get('oneliner', '')}" for s in sig_oneliners])
                 + ("\n" if sig_oneliners and trade_reads else "")
                 + "\n".join([f"- {t.get('label', '')} [{t.get('call', '')}]: {t.get('paragraph', '')}" for t in trade_reads])
@@ -331,7 +380,9 @@ class DinoPartner:
                 "symbol": coin,
                 "anchor_price": mid_px,
                 "mode_label": mode_label,
+                "reconciliation_note": reconciliation_note,
                 "market_summary": market_summary,
+                "coin_summaries": coin_summaries,
                 "active_signal_oneliners": sig_oneliners,
                 "committed_trade_reads": trade_reads,
                 "self_improvement_note": imp_note,
