@@ -229,7 +229,6 @@ def fmt_px(val: float) -> str:
 
 
 def get_coin_liq(coin: str, mid_price: float, liq_raw: dict, vol_pct: float = 1.5) -> dict:
-    """Always returns liquidation clusters scaled strictly to the selected coin's own price."""
     long_c = float(liq_raw.get("long_cluster", 0.0) or 0.0)
     short_c = float(liq_raw.get("short_cluster", 0.0) or 0.0)
     long_usd = float(liq_raw.get("long_usd", 0.0) or 0.0)
@@ -519,7 +518,10 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
             live_px = t_entry
 
         is_long = t_dir == "LONG"
-        sl_hit = tr.get("sl_hit", False)
+        sl_hit = bool(tr.get("sl_hit", False))
+        actual_sl_hit = bool(
+            sl_hit or (t_sl > 0 and live_px > 0 and ((is_long and live_px <= t_sl) or ((not is_long) and live_px >= t_sl)))
+        )
         tp1_hit = tr.get("tp1_hit", False)
         tp2_hit = tr.get("tp2_hit", False)
         tp3_hit = tr.get("tp3_hit", False)
@@ -536,7 +538,7 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
         def get_progress_val(tp_val: float, hit: bool) -> float:
             if hit or tp3_hit:
                 return 100.0
-            if sl_hit:
+            if actual_sl_hit:
                 return 0.0
             if is_long:
                 dist = max(tp_val - t_entry, 1e-8)
@@ -552,7 +554,7 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
         with st.container():
             st.markdown('<div class="gz-row-container">', unsafe_allow_html=True)
-            if sq_alert and not sl_hit:
+            if sq_alert and not actual_sl_hit:
                 st.markdown(
                     f"<div class='gz-blink-red' style='margin-bottom:10px;'><span class='gz-blink-dot'></span>{sq_alert}</div>",
                     unsafe_allow_html=True,
@@ -588,7 +590,7 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
                 )
 
             with cols[3]:
-                if sl_hit:
+                if actual_sl_hit:
                     st.markdown(
                         "<div style='font-size:13px;color:#f87171;font-weight:900;padding:12px 0;text-align:center;'>STOP-LOSS HIT — MONITORING FROZEN</div>",
                         unsafe_allow_html=True,
@@ -613,7 +615,7 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
                     )
 
             with cols[4]:
-                if sl_hit:
+                if actual_sl_hit:
                     st.markdown(
                         "<div style='font-size:13px;color:#f87171;font-weight:800;padding-top:14px;'>Halted at SL.</div>",
                         unsafe_allow_html=True,
@@ -632,7 +634,7 @@ def render_active_trades_table(trades_list: list, tickers: dict, tab_prefix: str
 
             with cols[5]:
                 def status_badge(lbl: str, hit: bool, pct: float) -> str:
-                    if sl_hit:
+                    if actual_sl_hit:
                         return "<span class='gz-blink-red'><span class='gz-blink-dot'></span>SL HIT</span>"
                     if tp3_hit and lbl == "TP3":
                         return "<span style='color:#34d399;font-weight:900;font-size:13px;'>ALL TPs HIT</span>"
@@ -694,7 +696,7 @@ with hdr_col2:
 
 with hdr_col3:
     st.write("")
-    auto_refresh = st.toggle("⚡ Real-Time Stream (500ms)", value=True)
+    auto_refresh = st.toggle("⚡ Real-Time Stream (1.5s)", value=True)
 
 tab_student, tab_pro, tab_vault = st.tabs([
     "🎯 Godzilla Prioritized Signal Terminal (1H · 4H)",
@@ -736,7 +738,7 @@ with tab_student:
         structural_zones=[],
     )
 
-    @st.fragment(run_every=0.5 if auto_refresh else None)
+    @st.fragment(run_every=1.5 if auto_refresh else None)
     def render_godzilla_dashboard():
         coin = st.session_state.student_coin
         snap = manager.get_snapshot(coin)
@@ -754,7 +756,7 @@ with tab_student:
         squeeze_state = metrics.get("squeeze_state", "NORMAL")
         squeeze_msg = metrics.get("squeeze_msg", "")
         momentum_msg = metrics.get("momentum_msg", "")
-        has_sl_in_active = any(t.get("sl_hit") or t.get("squeeze_alert") for t in active_trades)
+        has_sl_in_active = any(t.get("sl_hit") for t in active_trades)
 
         if squeeze_state != "NORMAL" or has_sl_in_active:
             alert_txt = squeeze_msg or "ACTIVE TRADE WARNING: STOP-LOSS OR SQUEEZE CONDITION DETECTED"
